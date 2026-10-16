@@ -1,5 +1,5 @@
 //! Attempt-scoped HTTP credentials. Secrets and CA private keys stay in memory.
-use crate::network::{Destination, parse_authority};
+use crate::network::{Destination, Host, parse_authority};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -395,10 +395,21 @@ impl Vault {
         destination: &Destination,
     ) -> Result<rustls::ServerConnection, crate::proxy::Reason> {
         use crate::proxy::Reason;
-        let host = destination.host.to_string();
         let key = rcgen::KeyPair::generate().map_err(|_| Reason::InternalError)?;
-        let params =
-            rcgen::CertificateParams::new(vec![host]).map_err(|_| Reason::InternalError)?;
+        // An IP literal must be an IP SAN: `Host`'s URI display brackets
+        // IPv6, and neither rcgen's DNS names nor rustls's `ServerName`
+        // accept the brackets, so a bracketed literal fails before any byte
+        // is exchanged.
+        let params = match &destination.host {
+            Host::Name(name) => rcgen::CertificateParams::new(vec![name.clone()])
+                .map_err(|_| Reason::InternalError)?,
+            Host::Ip(ip) => {
+                let mut ip_params =
+                    rcgen::CertificateParams::new(Vec::new()).map_err(|_| Reason::InternalError)?;
+                ip_params.subject_alt_names = vec![rcgen::SanType::IpAddress(*ip)];
+                ip_params
+            }
+        };
         let certificate = params
             .signed_by(&key, &self.ca)
             .map_err(|_| Reason::InternalError)?;
@@ -415,11 +426,26 @@ impl Vault {
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         rustls::ServerConnection::new(Arc::new(config)).map_err(|_| Reason::InternalError)
     }
+    /// The origin name a lane verifies the upstream certificate against.
+    /// IP literals stay IP names: `Host`'s URI display brackets IPv6, and
+    /// the bracketed form is not a valid `ServerName`.
+    fn server_name(
+        host: &Host,
+    ) -> Result<rustls::pki_types::ServerName<'static>, rustls::pki_types::InvalidDnsNameError>
+    {
+        match host {
+            Host::Name(name) => {
+                rustls::pki_types::ServerName::try_from(name.clone()).map(|name| name.to_owned())
+            }
+            Host::Ip(ip) => Ok(rustls::pki_types::ServerName::from(*ip)),
+        }
+    }
+
     pub(crate) fn client(
         &self,
         destination: &Destination,
     ) -> Result<rustls::ClientConnection, crate::proxy::Reason> {
-        let name = rustls::pki_types::ServerName::try_from(destination.host.to_string())
+        let name = Self::server_name(&destination.host)
             .map_err(|_| crate::proxy::Reason::OriginUnverified)?;
         rustls::ClientConnection::new(self.client.clone(), name)
             .map_err(|_| crate::proxy::Reason::InternalError)
@@ -440,7 +466,7 @@ mod tests {
     use std::net::TcpListener;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::{Mutex, mpsc};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use crate::platform::linux::bridge::HTTP_PORT;
 
@@ -1099,5 +1125,69 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    /// Drives a full handshake between the vault's terminated server side
+    /// and its re-originated client side over loopback sockets, so the
+    /// certificate is verified exactly as a lane would verify it. A
+    /// destination that is an IP literal only passes when the certificate
+    /// carries that address as an IP SAN and the client presented
+    /// `ServerName::Ip`, not the bracketed URI form.
+    fn handshakes_for(host: Host) -> bool {
+        let vault = Vault::new("test-attempt", Vec::new()).unwrap();
+        let destination = Destination {
+            host: host.clone(),
+            port: 443,
+        };
+        let mut server = vault.server(&destination).unwrap();
+        let mut client = rustls::ClientConnection::new(
+            roots(vault.ca.der().clone()),
+            Vault::server_name(&host).unwrap(),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client_end = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let mut server_end = listener.accept().unwrap().0;
+        // Nonblocking with a small spin: `complete_io` on blocking sockets
+        // can park both ends waiting on each other forever.
+        client_end.set_nonblocking(true).unwrap();
+        server_end.set_nonblocking(true).unwrap();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if !client.is_handshaking() && !server.is_handshaking() {
+                return true;
+            }
+            let _ = client.complete_io(&mut client_end);
+            let _ = server.complete_io(&mut server_end);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        !client.is_handshaking() && !server.is_handshaking()
+    }
+
+    #[test]
+    fn ip_literals_become_ip_server_names_and_names_stay_dns() {
+        assert!(matches!(
+            Vault::server_name(&Host::Ip("2001:db8::1".parse().unwrap())).unwrap(),
+            rustls::pki_types::ServerName::IpAddress(_)
+        ));
+        assert!(matches!(
+            Vault::server_name(&Host::Name("fixture.test".into())).unwrap(),
+            rustls::pki_types::ServerName::DnsName(_)
+        ));
+    }
+
+    #[test]
+    fn an_ipv6_literal_destination_gets_an_ip_san_not_a_bracketed_name() {
+        assert!(handshakes_for(Host::Ip("2001:db8::1".parse().unwrap())));
+    }
+
+    #[test]
+    fn an_ipv4_literal_destination_gets_an_ip_san() {
+        assert!(handshakes_for(Host::Ip("127.0.0.1".parse().unwrap())));
+    }
+
+    #[test]
+    fn a_dns_named_destination_verifies_unchanged() {
+        assert!(handshakes_for(Host::Name("fixture.test".into())));
     }
 }

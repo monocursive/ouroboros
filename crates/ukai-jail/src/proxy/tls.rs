@@ -153,7 +153,7 @@ fn relay_inner(connection: &Connection<'_>, outcome: &mut RelayOutcome) -> Resul
         connection.chunk,
         outcome,
     )?;
-    let response = read_response(&mut outgoing, &watch)?;
+    let response = read_response(&mut outgoing, &watch, lifetime)?;
     let switched = response.starts_with(b"HTTP/1.1 101 ");
     if switched {
         // A switch nobody asked for is the upstream's protocol error.
@@ -312,10 +312,13 @@ fn forward(
 
 /// Reads the upstream's response head, bounded by [`MAX_HEAD`], before
 /// anything of it reaches the client, so no protocol switch is exposed
-/// before it is checked. A revoked lease ends the wait.
+/// before it is checked. A revoked lease ends the wait. The loop is also
+/// bounded by the lane's lifetime: each read may reset the 30s I/O timeout,
+/// so a slow-dripping upstream must not hold the lane past §6.3's 300s.
 fn read_response(
     outgoing: &mut Outgoing<'_>,
     watch: &crate::vault::lifecycle::Watch,
+    lifetime: Instant,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, Reason> {
     let mut response = zeroize::Zeroizing::new(Vec::new());
     while !response.ends_with(b"\r\n\r\n") {
@@ -325,6 +328,19 @@ fn read_response(
         if watch.revoked() {
             return Err(Reason::CredentialRevoked);
         }
+        // The per-read I/O timeout covers a silent upstream; the remaining
+        // lifetime covers a dripping one: whichever ends first ends the
+        // head.
+        let remaining = lifetime.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            // The lane's lifetime is spent; a zero timeout is not
+            // portable, so end the head explicitly.
+            return Err(Reason::ConnectFailed);
+        }
+        outgoing
+            .sock
+            .set_read_timeout(Some(UPSTREAM_IO.min(remaining)))
+            .map_err(|_| Reason::InternalError)?;
         let mut byte = [0];
         outgoing
             .read_exact(&mut byte)
@@ -862,6 +878,61 @@ mod tests {
     /// The lifetime [`pump_against`] gives the pump: far longer than any
     /// case needs, so ending at it is a failure to end on the cause.
     const PUMP_TEST_LIFETIME: Duration = Duration::from_secs(5);
+
+    /// A slow-dripping upstream — every byte well within the 30s I/O
+    /// timeout — must not hold the response head past the lane's lifetime:
+    /// each read resets the I/O timeout, so only the lifetime bounds it.
+    #[test]
+    fn a_dripping_upstream_ends_the_response_head_at_the_lifetime() {
+        use std::sync::Arc;
+        let vault = crate::vault::Vault::new("test-attempt", Vec::new()).unwrap();
+        let target = crate::network::parse_authority("fixture.test:443", None).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let remote = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let upstream_end = listener.accept().unwrap().0;
+        let (watch_socket, watch_peer) = UnixStream::pair().unwrap();
+        let watch = crate::vault::lifecycle::Watch::start(
+            Arc::new(crate::vault::lifecycle::Lease::default()),
+            Arc::new(watch_socket),
+            Arc::new(remote.try_clone().unwrap()),
+        )
+        .unwrap();
+        let server_conn = vault.server(&target).unwrap();
+        // The upstream handshakes and then drips one byte at a time, never
+        // completing the `\r\n\r\n`.
+        let dripper = std::thread::spawn(move || {
+            let mut server = rustls::StreamOwned::new(server_conn, upstream_end);
+            while server.conn.is_handshaking() {
+                if server.conn.complete_io(&mut server.sock).is_err() {
+                    return;
+                }
+            }
+            loop {
+                if server
+                    .write_all(b"\r")
+                    .and_then(|_| server.flush())
+                    .is_err()
+                {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        remote.set_read_timeout(Some(UPSTREAM_IO)).unwrap();
+        let mut outgoing = rustls::StreamOwned::new(vault.client(&target).unwrap(), &remote);
+        let lifetime = Instant::now() + Duration::from_millis(300);
+        let started = Instant::now();
+        let result = read_response(&mut outgoing, &watch, lifetime);
+        // Close the client side so the dripper's next write fails and the
+        // thread ends.
+        drop(outgoing);
+        drop(remote);
+        let _ = dripper.join();
+        drop(watch_peer);
+        assert_eq!(result.unwrap_err(), Reason::ConnectFailed);
+        // Ended on the lifetime, not on any 30-second read timeout.
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn a_record_that_does_not_decrypt_is_blamed_on_the_side_that_sent_it() {
