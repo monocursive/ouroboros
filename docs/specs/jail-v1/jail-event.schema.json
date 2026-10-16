@@ -724,7 +724,7 @@
       }
     },
     {
-      "$comment": "jail-launch-and-summary.md §4.3 and §7 decision 5 (J13): a proxy result may name, by id only (never a value, placeholder or digest), the vault credentials whose placeholder the proxy replaced in a request head it sent upstream whole on that connection. Sorted and unique (validate_contract.py checks the order); absent when none was substituted, so a run without a vault journals the frames it did before.",
+      "$comment": "jail-launch-and-summary.md §4.3 and §7 decision 5 (J13): a proxy result may name, by id only (never a value, placeholder or digest), the vault credentials whose placeholder the proxy replaced in a request head it sent upstream whole (`credentials`), and those substituted into a head it began to send without the whole of it being confirmed sent (`credentials_unconfirmed`). Each is sorted and unique (validate_contract.py checks the order) and absent when empty, so a run without a vault journals the frames it did before. A denied request was refused before any of it was sent upstream, so it carries neither.",
       "if": {
         "properties": {
           "source": {
@@ -747,10 +747,53 @@
                 },
                 "minItems": 1,
                 "uniqueItems": true
+              },
+              "credentials_unconfirmed": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "uniqueItems": true
               }
             }
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "decision": {
+                  "const": "deny"
+                }
+              },
+              "required": [
+                "decision"
+              ]
+            },
+            "then": {
+              "properties": {
+                "fields": {
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "credentials"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "credentials_unconfirmed"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ]
       }
     },
     {

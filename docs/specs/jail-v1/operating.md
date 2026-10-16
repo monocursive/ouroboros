@@ -148,7 +148,8 @@ ukai-jail version [--json]
   `--attempt ID`'s), as text or as the original NDJSON lines (`--json`);
   `--follow` waits for more until the supervisor lets go. **`tail --summary`**
   prints that attempt's [end-of-run summary](#the-end-of-run-summary) on
-  stdout instead, the lines a terminal run printed, or with `--json` one
+  stdout instead, the lines a terminal run printed for it (unless its
+  receipt was rewritten since, as `gc` does), or with `--json` one
   `ukai.jail.summary/1` object ([schema](jail-summary.schema.json),
   [example](examples/summary-agent.json)). It refuses `--follow` and
   `--since`.
@@ -611,8 +612,13 @@ ukai-jail: receipt /home/u/.local/share/ukai/attempts/att_…/jail.json
 - **Network**: proxy results by destination and decision. The unit is a proxy
   result (a tunnel, or one request on the vault's TLS lane), not a request.
 - **Credentials**: for a vault credential, the proxy results whose upstream
-  request head carried its substituted value (`fields.credentials` on the
-  result), which says the value was sent, not that it was accepted; a staged
+  request head carried its substituted value whole (`fields.credentials` on
+  the result), which says the value was sent, not that it was accepted. A
+  head the proxy began to send without the whole of it being confirmed
+  (`fields.credentials_unconfirmed`) may have carried it: the count is then
+  `at least` and says how many such results there were. A refusal is a
+  request the proxy denied for a `credential_*` reason; a request that was
+  sent and then ended for one (a revocation in flight) is a use. A staged
   (`copy_rw`, `bind_ro`) credential is readable by the agent and has no use
   to count.
 - **Evidence**, then **limits** that were hit or not applied, and pending
@@ -624,16 +630,22 @@ receipt, every source's `source_seq` increasing without an unrecorded hole)
 holds exactly the receipt's `observed_count` for the class; a `degraded`
 class or an incomplete journal prints `at least`; an unobserved class prints
 `not observed`, never `0`; a journal that disagrees with its receipt prints
-`journal and receipt disagree on <class>` and no number for it. A journal
-over 16 MiB is not scanned and says so; under `--trace-fd` there is no local
-journal. Uses of a vault credential in a journal written before proxy
+`journal and receipt disagree on <class>` and no number for it. A frame of
+another attempt, or one whose `source_seq` does not increase, ends what is
+counted. A receipt rewritten after the journal's last note (`gc` records a
+completed cleanup that way, without a note) no longer matches the journal,
+so its summary says `journal ends on another receipt's note` and every count
+is a lower bound. A journal over 16 MiB is not scanned and says so; under
+`--trace-fd` the events go to the descriptor and the summary says `no local
+journal`. Uses of a vault credential in a journal written before proxy
 results named their credentials print `uses not recorded`. Nothing about
-reads or file contents is counted, because neither is observed.
-Every child-chosen string is escaped as in every other text rendering.
-[`summary_check.py`](summary_check.py) recomputes every number of a
-`tail --summary --json` object from the archived receipt and journal, with
-no code of this tool:
-`python3 -I summary_check.py <attempt-dir> <summary.json>`.
+reads or file contents is counted, because neither is observed. Every
+child-chosen string is escaped as in every other text rendering, and so are
+invisible separators and format characters.
+[`summary_check.py`](summary_check.py) recomputes a `tail --summary --json`
+object from the archived receipt and journal, with no code of this tool:
+which lines it has, every fact and count with its bound, and every line's
+text: `python3 -I summary_check.py <attempt-dir> <summary.json>`.
 
 ## Observation cost
 

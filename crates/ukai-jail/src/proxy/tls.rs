@@ -99,7 +99,9 @@ pub(super) fn relay(connection: &Connection<'_>) -> Result<RelayOutcome, Failure
         discarded: 0,
         end: EndReason::UpstreamClosed,
         head_sent: false,
+        head_partial: false,
         credentials: Vec::new(),
+        unconfirmed: Vec::new(),
     };
     match relay_inner(connection, &mut progress) {
         Ok(()) => Ok(progress),
@@ -156,10 +158,9 @@ fn relay_inner(connection: &Connection<'_>, outcome: &mut RelayOutcome) -> Resul
         outcome,
     );
     // J13: once the substituted head reached the upstream whole, its
-    // credentials were used, whatever happens to the body or the response.
-    if outcome.head_sent {
-        outcome.credentials = lease.ids();
-    }
+    // credentials were used, whatever happens to the body or the response;
+    // a head that was begun and not confirmed whole may have carried them.
+    outcome.attribute(lease.ids());
     forwarded?;
     let response = read_response(&mut outgoing, &watch, lifetime)?;
     let switched = response.starts_with(b"HTTP/1.1 101 ");
@@ -293,6 +294,10 @@ fn forward(
     chunk: usize,
     outcome: &mut RelayOutcome,
 ) -> Result<(), Reason> {
+    // From the first write on, part of the head may reach the upstream:
+    // rustls writes records to the socket inside `write` and does not say
+    // how many before an error.
+    outcome.head_partial = true;
     let sent = outgoing.write_all(&request.forward_head);
     let head_bytes = request.forward_head.len() as u64;
     request.forward_head.zeroize();
@@ -300,6 +305,7 @@ fn forward(
     outgoing.flush().map_err(|_| Reason::ConnectFailed)?;
     outcome.bytes_out = head_bytes;
     outcome.head_sent = true;
+    outcome.head_partial = false;
     let mut buffer = zeroize::Zeroizing::new(vec![0u8; chunk.max(1)]);
     let mut remaining_body = length;
     while remaining_body != 0 {
@@ -792,6 +798,56 @@ mod tests {
         }
     }
 
+    /// J13: `head_sent` is set only once the substituted head was written
+    /// and flushed; a head whose write began and failed may have left in
+    /// part, so it is `head_partial`, never sent.
+    #[test]
+    fn a_head_the_upstream_did_not_take_is_not_sent() {
+        use std::sync::Arc;
+        let vault = crate::vault::Vault::new("test-attempt", Vec::new()).unwrap();
+        let target = crate::network::parse_authority("fixture.test:443", None).unwrap();
+        let (socket, _client) = UnixStream::pair().unwrap();
+        let socket = Arc::new(socket);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let remote = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _accepted = listener.accept().unwrap();
+        remote.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut incoming = rustls::StreamOwned::new(
+            vault.server(&target).unwrap(),
+            ClientIo {
+                prefix: b"",
+                socket: &socket,
+                deadline: Instant::now() + Duration::from_secs(5),
+            },
+        );
+        let mut outgoing = rustls::StreamOwned::new(vault.client(&target).unwrap(), &remote);
+        let mut request = crate::proxy::http::parse_request(
+            b"GET http://fixture.test:443/ HTTP/1.1\r\nHost: fixture.test:443\r\n\r\n",
+        )
+        .unwrap();
+        let mut outcome = RelayOutcome {
+            bytes_in: 0,
+            bytes_out: 0,
+            discarded: 0,
+            end: EndReason::UpstreamClosed,
+            head_sent: false,
+            head_partial: false,
+            credentials: Vec::new(),
+            unconfirmed: Vec::new(),
+        };
+        let forwarded = forward(
+            &mut incoming,
+            &mut outgoing,
+            &mut request,
+            0,
+            64,
+            &mut outcome,
+        );
+        assert!(forwarded.is_err());
+        assert!(!outcome.head_sent);
+        assert!(outcome.head_partial);
+    }
+
     #[test]
     fn the_pump_ends_at_the_connection_lifetime_and_says_so() {
         use std::sync::Arc;
@@ -816,7 +872,9 @@ mod tests {
             discarded: 0,
             end: EndReason::UpstreamClosed,
             head_sent: false,
+            head_partial: false,
             credentials: Vec::new(),
+            unconfirmed: Vec::new(),
         };
         let pumped = pump(
             vault.server(&target).unwrap(),
@@ -866,7 +924,9 @@ mod tests {
             discarded: 0,
             end: EndReason::UpstreamClosed,
             head_sent: false,
+            head_partial: false,
             credentials: Vec::new(),
+            unconfirmed: Vec::new(),
         };
         let started = Instant::now();
         let pumped = pump(

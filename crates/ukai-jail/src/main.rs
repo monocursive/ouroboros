@@ -807,7 +807,7 @@ fn run(context: &Context, args: &RunArgs) -> ExitCode {
         // journal on disk alone, as `tail --summary` computes it, so the two
         // print the same lines; the receipt line stays last. The exit code
         // never depends on it.
-        print_summary(path, args.trace_fd);
+        print_summary(path);
     }
     exit(report.exit_code)
 }
@@ -815,11 +815,11 @@ fn run(context: &Context, args: &RunArgs) -> ExitCode {
 /// J13: the end-of-run summary of the attempt whose canonical receipt is
 /// `receipt`, then the receipt line. A summary that cannot be computed is
 /// said so in one line; the receipt line still prints.
-fn print_summary(receipt: &std::path::Path, trace_fd: Option<i32>) {
+fn print_summary(receipt: &std::path::Path) {
     let lines = receipt
         .parent()
         .ok_or_else(|| "the receipt has no attempt directory".to_owned())
-        .and_then(|attempt| ukai_jail::summary::summarize_attempt(attempt, trace_fd));
+        .and_then(ukai_jail::summary::summarize_attempt);
     match lines {
         Ok(summary) => {
             for line in summary.terminal(receipt) {
@@ -882,7 +882,7 @@ fn tail_summary(context: &Context, args: &TailArgs) -> ExitCode {
         .map_err(|error| error.message)
         .and_then(|data| ukai_jail::journal::attempt_path(&data, args.attempt.as_deref()))
         .and_then(|attempt| {
-            ukai_jail::summary::summarize_attempt(&attempt, None).map(|summary| (attempt, summary))
+            ukai_jail::summary::summarize_attempt(&attempt).map(|summary| (attempt, summary))
         });
     let (attempt, summary) = match result {
         Ok(found) => found,

@@ -40,9 +40,39 @@ pub(super) struct RelayOutcome {
     /// Whether the request head (the relay's prefix: a rewritten head, or a
     /// tunnel's early bytes) reached the upstream socket whole.
     pub head_sent: bool,
+    /// Whether some of the head may have reached the upstream without the
+    /// whole of it being confirmed written: a head whose write failed.
+    pub head_partial: bool,
     /// J13: the vault credentials substituted into that head, sorted and
     /// unique; empty unless `head_sent`.
     pub credentials: Vec<String>,
+    /// J13: the same, when the head is `head_partial`.
+    pub unconfirmed: Vec<String>,
+}
+
+impl RelayOutcome {
+    /// Copies what the relay established into its connection's result: the
+    /// counters and, J13, the credentials its head carried, sent or
+    /// unconfirmed.
+    pub(super) fn record(&self, result: &mut super::ProxyResult) {
+        result.bytes_in = self.bytes_in;
+        result.bytes_out = self.bytes_out;
+        result.discarded_bytes = self.discarded;
+        result.credentials = self.credentials.clone();
+        result.credentials_unconfirmed = self.unconfirmed.clone();
+    }
+
+    /// J13: names `ids`, the credentials substituted into this relay's head,
+    /// for its result: used when the head reached the upstream whole,
+    /// unconfirmed when it was begun and not confirmed whole, and nowhere
+    /// when none of it left.
+    pub(super) fn attribute(&mut self, ids: Vec<String>) {
+        if self.head_sent {
+            self.credentials = ids;
+        } else if self.head_partial {
+            self.unconfirmed = ids;
+        }
+    }
 }
 
 /// The relay's second thread could not be started; nothing was written to
@@ -175,17 +205,33 @@ fn relay(
         );
         spawn_worker(move || request(client, upstream, first, finished))?
     };
-    if !prefix.is_empty() && (&**upstream).write_all(prefix).is_err() {
+    // The prefix is written by hand rather than with `write_all`, so the
+    // result counts what the upstream socket reported taking. A write that
+    // fails cannot say how much of its buffer left first (a blocking write
+    // that fails part-way may report none of it), so a failed head may have
+    // carried its credentials in part (J13).
+    let mut written = 0;
+    while written < prefix.len() {
+        match (&**upstream).write(&prefix[written..]) {
+            Ok(0) => break,
+            Ok(n) => written += n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    if written < prefix.len() {
         let _ = go.send(false);
         close_both(client, upstream);
         let _ = worker.join();
         return Ok(RelayOutcome {
             bytes_in: 0,
-            bytes_out: 0,
+            bytes_out: u64::try_from(written).unwrap_or(u64::MAX),
             discarded: 0,
             end: EndReason::UpstreamError,
             head_sent: false,
+            head_partial: true,
             credentials: Vec::new(),
+            unconfirmed: Vec::new(),
         });
     }
     // Only now may the worker read the client: the prefix is ahead of
@@ -206,7 +252,9 @@ fn relay(
         discarded,
         end,
         head_sent: true,
+        head_partial: false,
         credentials: Vec::new(),
+        unconfirmed: Vec::new(),
     })
 }
 
@@ -490,6 +538,116 @@ mod tests {
         };
         let used = state.feed(input);
         (used, state)
+    }
+
+    /// J13: a sent head's credentials are used, a partly sent head's are
+    /// unconfirmed, and a head none of which left names none.
+    #[test]
+    fn credentials_follow_what_the_upstream_took_of_the_head() {
+        let outcome = |head_sent, head_partial| {
+            let mut outcome = RelayOutcome {
+                bytes_in: 0,
+                bytes_out: 0,
+                discarded: 0,
+                end: EndReason::UpstreamClosed,
+                head_sent,
+                head_partial,
+                credentials: Vec::new(),
+                unconfirmed: Vec::new(),
+            };
+            outcome.attribute(vec!["api".to_owned()]);
+            (outcome.credentials, outcome.unconfirmed)
+        };
+        let api = || vec!["api".to_owned()];
+        assert_eq!(outcome(true, false), (api(), Vec::new()));
+        assert_eq!(outcome(false, true), (Vec::new(), api()));
+        assert_eq!(outcome(false, false), (Vec::new(), Vec::new()));
+    }
+
+    /// J13: a result records the credentials its relay attributed, sent and
+    /// unconfirmed alike.
+    #[test]
+    fn a_result_records_the_credentials_of_its_relay() {
+        let outcome = RelayOutcome {
+            bytes_in: 1,
+            bytes_out: 2,
+            discarded: 3,
+            end: EndReason::UpstreamClosed,
+            head_sent: false,
+            head_partial: true,
+            credentials: vec!["sent".to_owned()],
+            unconfirmed: vec!["maybe".to_owned()],
+        };
+        let mut result = super::super::server::denial(
+            1,
+            None,
+            super::super::RequestKind::Http,
+            super::super::Reason::Relayed,
+            std::time::Instant::now(),
+        );
+        outcome.record(&mut result);
+        assert_eq!(
+            (result.bytes_in, result.bytes_out, result.discarded_bytes),
+            (1, 2, 3)
+        );
+        assert_eq!(result.credentials, ["sent"]);
+        assert_eq!(result.credentials_unconfirmed, ["maybe"]);
+    }
+
+    /// J13: a head whose write failed after the upstream may have taken
+    /// part of it is partial, never sent.
+    #[test]
+    fn a_prefix_the_upstream_took_in_part_is_partial() {
+        let (client, _peer) = UnixStream::pair().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        // The peer reads nothing, then goes away while the relay is still
+        // writing a head far larger than both socket buffers.
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(accepted);
+        });
+        let head = vec![b'h'; 64 * 1024 * 1024];
+        let outcome = relay(
+            &Arc::new(client),
+            &Arc::new(upstream),
+            &head,
+            64,
+            Box::new(|_, _, _, _| (0, 0)),
+        );
+        closer.join().unwrap();
+        let Ok(outcome) = outcome else {
+            panic!("the relay started");
+        };
+        assert!(!outcome.head_sent);
+        assert!(outcome.head_partial);
+        assert!(outcome.bytes_out < head.len() as u64);
+    }
+
+    /// J13: a prefix the upstream socket refused is not a sent head, so its
+    /// credentials are not a use; whether any of it left cannot be known, so
+    /// it is partial.
+    #[test]
+    fn a_prefix_that_cannot_be_written_is_not_sent() {
+        let (client, _peer) = UnixStream::pair().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _accepted = listener.accept().unwrap();
+        upstream.shutdown(Shutdown::Write).unwrap();
+        let outcome = relay(
+            &Arc::new(client),
+            &Arc::new(upstream),
+            b"GET / HTTP/1.1\r\nAuthorization: Bearer secret\r\n\r\n",
+            64,
+            Box::new(|_, _, _, _| (0, 0)),
+        );
+        let Ok(outcome) = outcome else {
+            panic!("the relay started");
+        };
+        assert!(!outcome.head_sent);
+        assert!(outcome.head_partial);
+        assert_eq!(outcome.end, EndReason::UpstreamError);
     }
 
     #[test]

@@ -527,5 +527,6 @@ pub(super) fn denial(
         duration: accepted_at.elapsed(),
         end: None,
         credentials: Vec::new(),
+        credentials_unconfirmed: Vec::new(),
     }
 }

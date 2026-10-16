@@ -2384,6 +2384,7 @@ fn n02_a_resource_failure_event_is_truthful() {
         duration: Duration::from_millis(3),
         end: None,
         credentials: Vec::new(),
+        credentials_unconfirmed: Vec::new(),
     };
     let event = proxy::proxy_event(&result, ATTEMPT, 1, SystemTime::now(), 1);
     assert_eq!(event.decision, Some(Decision::Allow));

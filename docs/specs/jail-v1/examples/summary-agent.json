@@ -80,6 +80,7 @@
             "transitions": [
               "loaded"
             ],
+            "unconfirmed": 0,
             "uses": 41,
             "uses_bound": "exact"
           }

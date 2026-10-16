@@ -71,14 +71,19 @@
 #   Rationale: additive only. A proxy result may carry `fields.credentials`,
 #   the ids (never values, placeholders or digests) of the vault credentials
 #   whose placeholder the proxy replaced in a request head it sent upstream
-#   whole, sorted and unique, absent when none was; a credential lifecycle
-#   note may carry `uses_recorded: true`, which tells a reader the build
-#   records those ids (the receipt's `jail.version` cannot, since every
-#   build reports the same one), and its existing `credential_id` and
-#   `transition` are now stated. A run without a vault journals the frames
-#   it did before. New examples: event-proxy-vault.json,
-#   event-note-credential.json and summary-agent.json (product output).
-#   No shared field changed meaning.
+#   whole, and `fields.credentials_unconfirmed`, those substituted into a
+#   head it began to send without the whole being confirmed sent; each
+#   sorted and unique, absent when empty, and never on a denied result,
+#   which the proxy refused before sending any of it (the vault's TLS lane
+#   now records a request that failed after its head began to go out as
+#   allowed, with the failure as its reason and end, as the plain lane
+#   already did). A credential lifecycle note may carry
+#   `uses_recorded: true`, which tells a reader the build records those ids
+#   (the receipt's `jail.version` cannot, since every build reports the
+#   same one), and its existing `credential_id` and `transition` are now
+#   stated. A run without a vault journals the frames it did before. New
+#   examples: event-proxy-vault.json, event-note-credential.json and
+#   summary-agent.json (product output). No shared field changed meaning.
 schema = "ukai.jail.frozen-schemas/1"
 milestone = "milestone-1"
 
@@ -94,7 +99,7 @@ sha256 = "912d2f344762ffc08700195a10b692aae986c4d2397cdfad993e87f70a937702"
 file = "jail-event.schema.json"
 id = "urn:ukai:schema:jail-event:1"
 identifier = "ukai.event/1"
-sha256 = "24961911b0083c6b212aeb7a711adb1fe7954fcfadb88bd51b48913ba13469fe"
+sha256 = "fa0ef7a7304567e7d91feb13492035cdedc8448f4d225e42e983d13dc71ab57e"
 
 # §13.2: the receipt
 [[frozen]]
@@ -263,7 +268,7 @@ sha256 = "1c93bdf014b5508d5abf0b2c17b31ea863e8de87d0af18416194dc93206cbd33"
 file = "jail-summary.schema.json"
 id = "urn:ukai:schema:jail-summary:1"
 identifier = "ukai.jail.summary/1"
-sha256 = "3c25feb05031e263b69924cc57cc230041aab25a98879f2c866b09c560ede3d6"
+sha256 = "41b14011aede95632b970727182e411001693d49a8d2639d86beaf7cbceaac71"
 
 [[frozen]]
 file = "learned-policy.schema.json"

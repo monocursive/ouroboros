@@ -110,6 +110,7 @@ impl ResultSlot<'_> {
             duration: self.accepted_at.elapsed(),
             end: None,
             credentials: Vec::new(),
+            credentials_unconfirmed: Vec::new(),
         }
     }
 
@@ -121,11 +122,8 @@ impl ResultSlot<'_> {
         end: EndReason,
     ) -> ProxyResult {
         let mut result = self.allowed(Reason::Relayed, Some(connected));
-        result.bytes_in = outcome.bytes_in;
-        result.bytes_out = outcome.bytes_out;
-        result.discarded_bytes = outcome.discarded;
+        outcome.record(&mut result);
         result.end = Some(end);
-        result.credentials = outcome.credentials.clone();
         result
     }
 
@@ -470,9 +468,7 @@ fn connect_and_relay(
         slot.emit(slot.allowed(Reason::ResourceExhausted, Some(upstream.address)));
         return Ok(());
     };
-    if outcome.head_sent {
-        outcome.credentials = substituted;
-    }
+    outcome.attribute(substituted);
     let end = if watch.revoked() {
         EndReason::CredentialRevoked
     } else if shared.is_stopping() {
@@ -619,6 +615,18 @@ fn relay_tls_lane(
             slot.origin_verification = Some(Verification::MitmHttpHost);
             slot.relayed(upstream.address, &outcome, outcome.end)
         }
+        // J13: once the request head began to reach the upstream, the
+        // request was allowed and sent, whatever ended it afterwards: it is
+        // recorded as allowed, with its credentials (or, when the head was
+        // not confirmed whole, its unconfirmed ones) and the failure as its
+        // reason and end, as the plain lane records a relay that failed. A
+        // denial is only a request refused before any of it was sent.
+        Err(failure) if failure.progress.head_sent || failure.progress.head_partial => {
+            slot.origin_verification = Some(Verification::MitmHttpHost);
+            let mut event = slot.relayed(upstream.address, &failure.progress, failure.progress.end);
+            event.reason = failure.reason;
+            event
+        }
         Err(failure) => {
             let mut event = denial(
                 slot.id,
@@ -631,9 +639,6 @@ fn relay_tls_lane(
             event.bytes_in = failure.progress.bytes_in;
             event.bytes_out = failure.progress.bytes_out;
             event.discarded_bytes = failure.progress.discarded;
-            // A request whose substituted head reached the upstream used
-            // its credentials, whatever ended the connection afterwards.
-            event.credentials = failure.progress.credentials;
             if event.bytes_in != 0 || event.bytes_out != 0 {
                 event.end = Some(failure.progress.end);
             }

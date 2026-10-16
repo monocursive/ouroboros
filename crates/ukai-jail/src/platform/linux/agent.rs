@@ -1428,6 +1428,7 @@ mod tests {
             duration: Duration::ZERO,
             end: None,
             credentials: Vec::new(),
+            credentials_unconfirmed: Vec::new(),
         }
     }
 

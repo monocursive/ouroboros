@@ -461,6 +461,20 @@ fn a_binaries_bound_vault_credential_reaches_only_the_pinned_client() {
         "{relayed:#}"
     );
     assert_eq!(relayed["outcome"]["ok"], true, "{relayed:#}");
+    // J13 (K53): the relayed result names the credential its upstream
+    // request carried, by id; the refused ones name none.
+    assert_eq!(
+        relayed["fields"]["credentials"],
+        serde_json::json!(["api"]),
+        "{relayed:#}"
+    );
+    for id in [1, 2] {
+        assert!(
+            result(id)["fields"].get("credentials").is_none(),
+            "{:#}",
+            result(id)
+        );
+    }
     for id in [1, 2] {
         let denied = result(id);
         assert_eq!(denied["decision"], "deny", "{denied:#}");
@@ -487,11 +501,20 @@ fn a_binaries_bound_vault_credential_reaches_only_the_pinned_client() {
         })
         .collect();
     assert_eq!(notes, [("api", "loaded")], "{events:#?}");
+    // J13: the build that wrote them records credential uses.
+    assert!(
+        events
+            .iter()
+            .filter(|event| event["fields"]["kind"] == "credential")
+            .all(|event| event["fields"]["uses_recorded"] == true),
+        "{events:#?}"
+    );
 
     // The receipt: the credential never staged, one process-bound
-    // credential, and every proxy result accounted for. Nothing in it, or in
-    // the relayed proxy event, says which request carried the secret: the
-    // origin's record above is the only witness of the substitution.
+    // credential, and every proxy result accounted for. The receipt does not
+    // say which request carried the secret; the relayed proxy event names
+    // the credential (above), and the origin's record is the witness that
+    // the value itself arrived.
     assert_eq!(
         receipt["credentials"],
         serde_json::json!([{
@@ -521,6 +544,34 @@ fn a_binaries_bound_vault_credential_reaches_only_the_pinned_client() {
         receipt["applied"]["network"]["allowed_hosts"],
         serde_json::json!([destination]),
         "{receipt:#}"
+    );
+
+    // J13: the end-of-run summary of this attempt counts the one use and the
+    // two refusals, exactly. The harness takes the trace on a descriptor
+    // (`--trace-fd`), so the attempt keeps no local journal: the summary is
+    // computed over the streamed frames, the journal a local file would
+    // have held, and the final receipt.
+    let mut journal = Vec::new();
+    for event in events {
+        journal.extend(serde_json::to_vec(event).unwrap());
+        journal.push(b'\n');
+    }
+    let summary =
+        ukai_jail::summary::summary(&receipt, ukai_jail::summary::Journal::Bytes(&journal));
+    assert_eq!(
+        summary.journal,
+        ukai_jail::summary::JournalState::Complete,
+        "{summary:#?}"
+    );
+    let credentials = summary
+        .lines
+        .iter()
+        .find(|line| line.line == "credentials")
+        .expect("a credentials line");
+    assert_eq!(
+        credentials.text,
+        "credential api: vault, never staged · used on 1 proxy result · 2 credential refusals",
+        "{summary:#?}"
     );
 
     // The policy snapshot names the pinned path, and only it.

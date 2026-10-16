@@ -102,15 +102,20 @@ pub fn proxy_event(
             .end
             .map_or(Value::Null, |end| Value::from(end.as_str())),
     );
-    // J13: the vault credentials the upstream request carried, by id;
-    // absent when none, so a run without a vault journals what it did.
-    if !result.credentials.is_empty() {
-        let ids: std::collections::BTreeSet<&str> =
-            result.credentials.iter().map(String::as_str).collect();
-        fields.insert(
-            "credentials".to_owned(),
-            Value::from(ids.into_iter().collect::<Vec<_>>()),
-        );
+    // J13: the vault credentials the upstream request carried, by id, and
+    // those a head begun but not confirmed sent may have carried; each
+    // absent when empty, so a run without a vault journals what it did.
+    for (name, ids) in [
+        ("credentials", &result.credentials),
+        ("credentials_unconfirmed", &result.credentials_unconfirmed),
+    ] {
+        if !ids.is_empty() {
+            let ids: std::collections::BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+            fields.insert(
+                name.to_owned(),
+                Value::from(ids.into_iter().collect::<Vec<_>>()),
+            );
+        }
     }
     Event {
         schema: SCHEMA_EVENT.to_owned(),

@@ -411,6 +411,11 @@ pub struct ProxyResult {
     /// it sent upstream whole on this connection, sorted and unique. Empty
     /// when it replaced none, including every refused request.
     pub credentials: Vec<String>,
+    /// J13: the ids of the credentials substituted into a head the proxy
+    /// began to send upstream without the whole of it being confirmed sent:
+    /// their value may have left, so they are neither a counted use nor
+    /// nothing. Empty otherwise.
+    pub credentials_unconfirmed: Vec<String>,
 }
 
 /// Receives results. Called from connection threads; must not block for

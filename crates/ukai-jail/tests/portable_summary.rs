@@ -287,6 +287,15 @@ impl Fixture {
         )
     }
 
+    /// An allowed result whose substituted head was begun and not
+    /// confirmed sent: its credentials are unconfirmed.
+    fn unconfirmed(&mut self, destination: &str, credentials: &[&str]) -> &mut Self {
+        self.proxy(Some(destination), true, true, "connect_failed", &[]);
+        let last = self.events.len() - 1;
+        self.events[last]["fields"]["credentials_unconfirmed"] = json!(credentials);
+        self
+    }
+
     fn vault(&mut self, id: &str) -> &mut Self {
         let credentials = self.receipt["credentials"]
             .as_array_mut()
@@ -513,7 +522,7 @@ fn k45_refused_before_exec() {
             "workspace: not observed",
             "network: not applied",
             "evidence: observer not attached · 0/6 classes active · exec, fs.write, fs.deny, \
-             net, proxy.net, limits not observed · journal absent",
+             net, proxy.net, limits not observed · no local journal",
         ],
     );
     // An exec that failed after release: the tree was verified empty.
@@ -611,20 +620,23 @@ fn k45_none() {
     );
 }
 
+/// `--trace-fd` streams the journal to a descriptor and keeps none locally
+/// (jail-v1 §13.3): the attempt directory then holds no journal, and the
+/// live run and a later `tail --summary` both say only that.
 #[test]
-fn k45_trace_fd_streams_the_journal() {
+fn k45_trace_fd_keeps_no_local_journal() {
     let fixture = clean_agent();
-    let summary = summary::summary(&fixture.receipt, Journal::Streamed(5));
-    assert_eq!(summary.journal, JournalState::Streamed(5));
+    let summary = summary::summary(&fixture.receipt, Journal::Absent);
+    assert_eq!(summary.journal, JournalState::Absent);
     assert_lines(
         &summary,
         &[
             "settled · exited 0 · 1.0s attempt (wall clock) · survivors: none (verified)",
-            "workspace: journal streamed to fd 5",
-            "network: proxy, journal streamed to fd 5",
-            "credential api: vault, never staged · uses: journal streamed to fd 5",
-            "evidence: 6/6 classes active · journal streamed to fd 5 · reads and file contents \
-             are not observed",
+            "workspace: no local journal",
+            "network: proxy, no local journal",
+            "credential api: vault, never staged · uses: no local journal",
+            "evidence: 6/6 classes active · no local journal · reads and file contents are not \
+             observed",
         ],
     );
 }
@@ -693,7 +705,7 @@ fn k45_best_effort_after_a_loss() {
             "settled · exited 0 · 3m41s exec→settled · survivors: none (verified)",
             "workspace: at least 1 path opened for writing",
             "network: proxy, none recorded (a lower bound)",
-            "credential api: vault, never staged · used on at least 0 proxy results",
+            "credential api: vault, never staged · uses: none recorded (a lower bound)",
             "evidence: 1/6 classes active · exec degraded (trace_transport_loss, lost 7) · \
              fs.write degraded (trace_transport_loss, lost 7) · fs.deny degraded \
              (trace_transport_loss, lost 7) · net degraded (trace_transport_loss, lost 7) · \
@@ -744,6 +756,7 @@ struct Truth {
     allowed: BTreeMap<String, (u64, u64)>,
     denied: BTreeMap<(String, String), u64>,
     uses: u64,
+    unconfirmed: u64,
     refusals: u64,
 }
 
@@ -807,7 +820,7 @@ fn truth_of(events: &[Value]) -> Truth {
                         .entry((destination, reason.clone()))
                         .or_default() += 1;
                 }
-                if reason.starts_with("credential_") {
+                if event["decision"] == "deny" && reason.starts_with("credential_") {
                     truth.refusals += 1;
                 }
                 if fields["credentials"]
@@ -815,6 +828,12 @@ fn truth_of(events: &[Value]) -> Truth {
                     .is_some_and(|ids| ids.iter().any(|id| id == "api"))
                 {
                     truth.uses += 1;
+                }
+                if fields["credentials_unconfirmed"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id == "api"))
+                {
+                    truth.unconfirmed += 1;
                 }
             }
             _ => {}
@@ -877,7 +896,7 @@ fn k46_the_summary_never_claims_more_than_the_evidence() {
         run.lifecycle("exec_confirmed");
         run.credential_note("api", "loaded", true);
         for _ in 0..rng.below(40) {
-            match rng.below(12) {
+            match rng.below(13) {
                 0 => {
                     run.exec();
                 }
@@ -918,6 +937,10 @@ fn k46_the_summary_never_claims_more_than_the_evidence() {
                 10 => {
                     let host = rng.pick(&hosts);
                     run.proxy(Some(host), false, false, "host_not_allowed", &[]);
+                }
+                11 => {
+                    let host = rng.pick(&hosts);
+                    run.unconfirmed(host, &["api"]);
                 }
                 _ => {
                     run.proxy(
@@ -1105,6 +1128,11 @@ fn k46_the_summary_never_claims_more_than_the_evidence() {
             &api["uses"],
             truth.uses,
         );
+        // A use that may have happened unconfirmed makes the count a lower
+        // bound, never exact.
+        if truth.unconfirmed > 0 {
+            assert_ne!(api["uses_bound"], "exact", "{context}: unconfirmed uses");
+        }
         check_count(
             &format!("{context} refusals"),
             &credentials["refusals_bound"],
@@ -1454,10 +1482,10 @@ fn k53_uses_count_the_results_that_carried_the_credential() {
     fixture.vault("other");
     fixture.credential_note("other", "loaded", true);
     // A request whose head reached the upstream before the credential was
-    // revoked: a use and a refusal at once.
+    // revoked: allowed and sent, so a use and not a refusal.
     fixture.proxy(
         Some("api.example.test:443"),
-        false,
+        true,
         true,
         "credential_revoked",
         &["api", "other"],
@@ -1482,11 +1510,11 @@ fn k53_uses_count_the_results_that_carried_the_credential() {
         json!(["loaded", "revoked"])
     );
     assert_eq!(credentials["credentials"][1]["uses"], 1);
-    assert_eq!(credentials["refusals"], 2);
+    assert_eq!(credentials["refusals"], 1);
     assert_eq!(
         texts(&summary)[3],
         "credentials api: vault, never staged · used on 4 proxy results · revoked; other: \
-         vault, never staged · used on 1 proxy result · 2 credential refusals"
+         vault, never staged · used on 1 proxy result · 1 credential refusal"
     );
 
     // A journal whose credential notes lack the mark predates the field: its
@@ -1867,11 +1895,42 @@ fn k52_an_independent_script_recomputes_the_numbers() {
         disagreeing.open_write("extra");
         disagreeing.at(223_000_000_000);
         let disagreeing_journal = disagreeing.journal();
+        // Hostile strings in every field a line prints, eight lines, a
+        // credential with an unconfirmed use, and an incomplete journal.
+        let mut hostile = every_class();
+        let bad = "x\u{1b}]52;c;AAAA\u{7}\u{9b}2J\u{202e}\u{2028}";
+        for index in 0..7 {
+            hostile.proxy(
+                Some(&format!("h{index}{bad}.test:443")),
+                index % 2 == 0,
+                true,
+                bad,
+                &[],
+            );
+        }
+        hostile.unconfirmed("api.example.test:443", &["api"]);
+        hostile.credential_note("api", bad, true);
+        hostile.receipt["outcome"]["cause"] = json!(bad);
+        hostile.receipt["errors"] = json!([{"code": bad, "stage": "running", "message": "m",
+            "key_path": null, "remediation_category": "retry"}]);
+        hostile.receipt["applied"]["limits"] = json!([{"key": "wall", "requested": bad,
+            "required": true, "applied": true, "mechanism": "m", "scope": "tree", "hit": true}]);
+        hostile.receipt["state_cleanup"] = json!("pending");
+        hostile.receipt["child_protection"] = json!("unprotected");
+        hostile.sync();
+        let hostile_journal = hostile.journal_without_note();
+        let mut off = Fixture::from(example("receipt-agent-proxy-only.json"));
+        off.lifecycle("exec_confirmed");
+        off.proxy(Some("api.example.test:443"), true, true, "relayed", &[]);
+        off.sync();
+        let off_journal = off.journal();
         vec![
             ("clean", clean, clean_journal),
             ("unknown", unknown, unknown_journal),
             ("lossy", lossy, lossy_journal),
             ("disagreeing", disagreeing, disagreeing_journal),
+            ("hostile", hostile, hostile_journal),
+            ("observation off", off, off_journal),
         ]
     };
     for (name, fixture, journal) in cases {
@@ -1965,7 +2024,7 @@ fn k51_an_a01_sized_journal_is_summarized_within_the_budget() {
     let attempt = bin.record(&fixture, Some(&journal));
     // The cold read and parse, as `run` does it after settling.
     let started = std::time::Instant::now();
-    let summary = summary::summarize_attempt(&attempt, None).expect("summarized");
+    let summary = summary::summarize_attempt(&attempt).expect("summarized");
     let took = started.elapsed();
     println!(
         "K51: {} bytes, {} frames summarized in {took:?} ({} build)",
@@ -2006,7 +2065,7 @@ fn k51_a_journal_past_the_scan_cap_prints_the_receipt_only_lines() {
         journal.extend(Fixture::lines_of(&pad.events));
     }
     let attempt = bin.record(&fixture, Some(&journal));
-    let summary = summary::summarize_attempt(&attempt, None).expect("summarized");
+    let summary = summary::summarize_attempt(&attempt).expect("summarized");
     let size = journal.len().div_ceil(1024 * 1024);
     assert_eq!(
         summary.journal,
@@ -2026,5 +2085,517 @@ fn k51_a_journal_past_the_scan_cap_prints_the_receipt_only_lines() {
                  file contents are not observed"
             ),
         ],
+    );
+}
+
+// ===========================================================================
+// Evidence gates the adversarial review found unpinned (its surviving
+// mutants), one test each
+// ===========================================================================
+
+/// The receipt note is the journal's last frame only when nothing follows
+/// it: a torn frame or a corrupt line after it makes the journal incomplete
+/// (kills: dropping `!scan.broken` from the completeness check).
+#[test]
+fn review_bytes_after_the_final_note_make_the_journal_incomplete() {
+    let fixture = every_class();
+    let mut torn = fixture.journal();
+    torn.extend_from_slice(b"{\"schema\":\"ukai.event/1\",\"source\":\"au");
+    assert_eq!(fixture.summary_of(&torn).journal, JournalState::Incomplete);
+    let mut corrupt = fixture.journal();
+    corrupt.extend_from_slice(b"not a frame\n");
+    let summary = fixture.summary_of(&corrupt);
+    assert_eq!(summary.journal, JournalState::Incomplete);
+    assert_eq!(facts(&summary, "workspace")["bound"], "at_least");
+}
+
+/// The final note binds the journal to one receipt: a note naming another
+/// receipt (here, the receipt before `gc` recorded its cleanup complete,
+/// cleanup.rs `complete_receipt`) leaves the journal incomplete
+/// (kills: digest equality replaced by `true`).
+#[test]
+fn review_a_note_for_another_receipt_is_not_completeness() {
+    let mut fixture = every_class();
+    fixture.receipt["state_cleanup"] = json!("pending");
+    let journal = fixture.journal();
+    assert_eq!(fixture.summary_of(&journal).journal, JournalState::Complete);
+    let mut after_gc = fixture.receipt.clone();
+    after_gc["state_cleanup"] = json!("complete");
+    after_gc["revision"] = json!(after_gc["revision"].as_u64().unwrap() + 1);
+    let summary = summary::summary(&after_gc, Journal::Bytes(&journal));
+    assert_eq!(summary.journal, JournalState::Incomplete);
+    assert_eq!(facts(&summary, "workspace")["bound"], "at_least");
+    assert!(
+        texts(&summary)[4].contains("journal ends on another receipt's note"),
+        "{:?}",
+        texts(&summary)
+    );
+}
+
+/// A frame missing before any recorded loss makes the journal incomplete,
+/// even when it belongs to no counted class: here the credential's
+/// `revoked` note (kills: dropping `!scan.unrecorded_hole`, and never
+/// setting `unrecorded_hole`).
+#[test]
+fn review_an_unrecorded_hole_in_wrapper_notes_is_incomplete() {
+    let mut fixture = clean_agent();
+    fixture.credential_note("api", "revoked", true);
+    fixture.at(223_000_000_000);
+    let full = fixture.summary();
+    assert!(texts(&full)[3].contains("revoked"), "{:?}", texts(&full));
+    let index = fixture
+        .events
+        .iter()
+        .position(|event| event["fields"]["transition"] == "revoked")
+        .unwrap();
+    fixture.events.remove(index);
+    let summary = fixture.summary();
+    assert_eq!(summary.journal, JournalState::Incomplete);
+}
+
+/// After a recorded `trace_transport_loss`, a skipped sequence number is the
+/// loss the note records, and the journal can still be complete; before it,
+/// the same skip is an unrecorded hole (kills: the loss note never sets
+/// `loss_recorded`).
+#[test]
+fn review_a_hole_after_a_recorded_loss_is_not_incompleteness() {
+    let mut fixture = clean_agent();
+    for class in ["exec", "fs.write", "fs.deny", "net", "proxy.net"] {
+        let source = if class == "proxy.net" {
+            "proxy"
+        } else {
+            "audit"
+        };
+        fixture.receipt["coverage"][class] = json!({
+            "status": "degraded", "sources": [source], "observed_count": null,
+            "gaps": [{"classes": [class], "source": source, "start_ns": "0",
+                      "end_ns": null, "reason": "trace_transport_loss", "lost_count": null}],
+        });
+    }
+    // The wrapper's own frame 4 was lost; the loss note is frame 5.
+    *fixture.seq.get_mut("wrapper").unwrap() += 1;
+    fixture.push(
+        "wrapper",
+        "note",
+        Value::Null,
+        Fixture::wrapper_outcome(),
+        json!({"kind": "coverage_gap", "classes": ["exec"], "source": "wrapper",
+               "start_ns": "0", "end_ns": null, "reason": "trace_transport_loss",
+               "lost_count": 1}),
+    );
+    fixture.at(223_000_000_000);
+    assert_eq!(fixture.summary().journal, JournalState::Complete);
+}
+
+/// A line that is not one JSON object is not a frame, even when serde would
+/// read an array into the frame struct (kills: dropping the object-shape
+/// check), and a frame without `source_seq` is not a frame (kills: a
+/// missing sequence number accepted).
+#[test]
+fn review_non_object_and_unsequenced_lines_break_the_journal() {
+    let fixture = every_class();
+    let note = fixture.final_note();
+    let mut array = Fixture::lines_of(&fixture.events);
+    // Positionally a frame of a new source numbered 1: serde's derived
+    // visitor reads a sequence into the struct.
+    array.extend_from_slice(b"[\"x\",1]\n");
+    array.extend(Fixture::lines_of(std::slice::from_ref(&note)));
+    assert_eq!(fixture.summary_of(&array).journal, JournalState::Incomplete);
+    let mut events = fixture.events.clone();
+    let mut unsequenced = events[events.len() - 1].clone();
+    unsequenced.as_object_mut().unwrap().remove("source_seq");
+    events.push(unsequenced);
+    events.push(note);
+    assert_eq!(
+        fixture.summary_of(&Fixture::lines_of(&events)).journal,
+        JournalState::Incomplete
+    );
+}
+
+/// A line over the 64 KiB event maximum is not a frame the trace wrote
+/// (kills: dropping the FRAME_MAX check).
+#[test]
+fn review_an_oversized_line_is_not_a_frame() {
+    let mut fixture = every_class();
+    let last = fixture.events.len() - 1;
+    fixture.events[last]["fields"]["padding"] = json!("p".repeat(70 * 1024));
+    assert_eq!(fixture.summary().journal, JournalState::Incomplete);
+}
+
+/// A lower bound above the receipt's own count is no bound: an incomplete
+/// journal of an active class that holds more frames than the receipt
+/// counted prints the disagreement (kills: the `counted > observed` gate).
+#[test]
+fn review_an_incomplete_journal_above_the_receipt_count_disagrees() {
+    let mut fixture = every_class();
+    fixture.open_write("extra-1").open_write("extra-2");
+    // The receipt keeps its counts; the journal has no final note.
+    let summary = fixture.summary_of(&fixture.journal_without_note());
+    assert_eq!(summary.journal, JournalState::Incomplete);
+    assert_eq!(facts(&summary, "workspace")["bound"], "disagree");
+    assert!(!texts(&summary)[1].contains("opened for writing"));
+}
+
+/// Limit hits are cgroup facts: a hit ceiling never reads as a journal
+/// disagreement (kills: dropping the `limits` NoJournal branch).
+#[test]
+fn review_limit_hits_are_not_journal_counts() {
+    let mut fixture = every_class();
+    fixture.receipt["coverage"]["limits"]["observed_count"] = json!(1);
+    fixture.receipt["applied"]["limits"][0]["hit"] = json!(true);
+    let summary = fixture.summary();
+    assert_eq!(facts(&summary, "evidence")["disagree"], json!([]));
+    assert!(texts(&summary)[4].contains("6/6 classes active, no gaps"));
+}
+
+/// Every receipt- or journal-sourced string reaches the terminal escaped:
+/// phase, credential mode, transitions, gap reasons, limit keys and values
+/// (kills each `shown()` removal that K48 does not reach).
+#[test]
+fn review_every_interpolated_string_is_escaped() {
+    let hostile = "x\u{1b}]52;c;AAAA\u{7}\u{9b}2J\u{202e}";
+    let mut fixture = Fixture::agent();
+    fixture.vault("api");
+    fixture.receipt["credentials"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "staged", "mode": hostile, "digest": null,
+                     "digest_unavailable_reason": "never_staged", "never_staged": false}));
+    fixture.credential_note("api", "loaded", true);
+    fixture.credential_note("api", hostile, true);
+    fixture.receipt["phase"] = json!(hostile);
+    fixture.receipt["coverage"]["exec"] = json!({"status": "degraded", "sources": ["audit"],
+        "observed_count": null, "gaps": [{"classes": ["exec"], "source": "audit",
+        "start_ns": "0", "end_ns": null, "reason": hostile, "lost_count": null}]});
+    fixture.receipt["applied"]["limits"] = json!([{"key": hostile, "requested": hostile,
+        "required": true, "applied": false, "mechanism": null, "scope": null, "hit": true}]);
+    fixture.sync();
+    let summary = fixture.summary();
+    for line in summary.terminal(Path::new("/r/jail.json")) {
+        assert_inert(&line);
+    }
+    for line in &summary.lines {
+        assert_inert(&line.text);
+    }
+}
+
+/// A frame of another attempt is not this attempt's evidence.
+#[test]
+fn review_a_frame_of_another_attempt_breaks_the_journal() {
+    let mut fixture = every_class();
+    fixture.open_write("elsewhere");
+    let last = fixture.events.len() - 1;
+    fixture.events[last]["attempt_id"] = json!("att_ffffffff-ffff-4fff-8fff-ffffffffffff");
+    fixture.sync();
+    fixture.at(223_000_000_000);
+    assert_ne!(facts(&fixture.summary(), "workspace")["bound"], "exact");
+}
+
+/// A failed write-class result opened nothing (kills: the `ok == true`
+/// guard removed).
+#[test]
+fn review_a_failed_write_result_is_not_opened_for_writing() {
+    let mut fixture = every_class();
+    fixture.audit(
+        "fs.create",
+        false,
+        json!({"path": Fixture::named("never-created"), "action": "opened_for_mutation"}),
+    );
+    fixture.sync();
+    fixture.at(223_000_000_000);
+    let summary = fixture.summary();
+    assert_eq!(facts(&summary, "workspace")["bound"], "exact");
+    assert_eq!(facts(&summary, "workspace")["opened_for_writing"], 3);
+}
+
+/// A refused exec or connect is not a refused write (kills: every
+/// `fs.deny` counted).
+#[test]
+fn review_only_file_operations_are_refused_writes() {
+    let mut fixture = every_class();
+    fixture.audit(
+        "fs.deny",
+        false,
+        json!({"path": Fixture::named("bin/tool"), "attempted_operation": "proc.exec"}),
+    );
+    fixture.sync();
+    fixture.at(223_000_000_000);
+    assert_eq!(facts(&fixture.summary(), "workspace")["refused"], 1);
+}
+
+/// A successful write outside every known root is recorded as a digest and
+/// counted unnamed (kills: `digest` dropped from `unnamed()`).
+#[test]
+fn review_a_digest_path_is_unnamed() {
+    let mut fixture = every_class();
+    fixture.audit(
+        "fs.write",
+        true,
+        json!({"path": {"kind": "digest", "digest": format!("sha256:{}", "e".repeat(64)),
+                        "reason": "outside_known_roots"},
+               "action": "opened_for_mutation"}),
+    );
+    fixture.sync();
+    fixture.at(223_000_000_000);
+    assert_eq!(facts(&fixture.summary(), "workspace")["unnamed"], 1);
+}
+
+/// The duration runs from the first exec confirmation to the *settled*
+/// receipt note: an unsettled attempt has none (kills: any receipt note
+/// ends it; the last exec confirmation starts it).
+#[test]
+fn review_the_duration_needs_the_settled_note_and_the_first_exec() {
+    let mut fixture = Fixture::from(example("receipt-tool.json"));
+    fixture.receipt["phase"] = json!("enforced");
+    fixture.lifecycle("exec_confirmed");
+    fixture.at(9_000_000_000);
+    let digest = digest(&fixture.receipt);
+    fixture.push(
+        "wrapper",
+        "jail.receipt",
+        Value::Null,
+        Fixture::wrapper_outcome(),
+        json!({"phase": "enforced", "receipt_digest": digest}),
+    );
+    let summary = fixture.summary_of(&fixture.journal_without_note());
+    assert!(
+        !texts(&summary)[0].contains("exec→settled"),
+        "{:?}",
+        texts(&summary)
+    );
+
+    let mut twice = every_class();
+    twice.at(100_000_000_000).lifecycle("exec_confirmed");
+    twice.at(223_000_000_000);
+    assert!(texts(&twice.summary())[0].contains("3m41s exec→settled"));
+}
+
+/// Observer gaps are gaps (kills: "no gaps" ignoring `/observer/gaps`).
+#[test]
+fn review_observer_gaps_are_not_no_gaps() {
+    let mut fixture = every_class();
+    fixture.receipt["observer"]["gaps"] = json!([{
+        "classes": ["exec"], "source": "audit", "start_ns": "0", "end_ns": null,
+        "reason": "fixture", "lost_count": null,
+    }]);
+    assert!(!texts(&fixture.summary())[4].contains("no gaps"));
+}
+
+/// A whole frame after the final note means the note is not the journal's
+/// last frame (kills: the last-note reset removed).
+#[test]
+fn review_a_frame_after_the_final_note_is_incompleteness() {
+    let mut fixture = every_class();
+    let mut events = fixture.events.clone();
+    events.push(fixture.final_note());
+    *fixture.seq.get_mut("wrapper").unwrap() += 1;
+    fixture.lifecycle("late");
+    events.push(fixture.events.last().unwrap().clone());
+    let summary = fixture.summary_of(&Fixture::lines_of(&events));
+    assert_eq!(summary.journal, JournalState::Incomplete);
+}
+
+/// A degraded class is never exact, whatever count its receipt carries
+/// (kills: the status gate removed from the exact branch).
+#[test]
+fn review_a_degraded_class_is_never_exact() {
+    let mut fixture = every_class();
+    let count = fixture.receipt["coverage"]["fs.write"]["observed_count"].clone();
+    fixture.receipt["coverage"]["fs.write"] = json!({"status": "degraded", "sources": ["audit"],
+        "observed_count": count, "gaps": [{"classes": ["fs.write"], "source": "audit",
+        "start_ns": "0", "end_ns": null, "reason": "queue_full", "lost_count": null}]});
+    assert_eq!(facts(&fixture.summary(), "workspace")["bound"], "at_least");
+}
+
+/// One result naming a credential twice is one use (kills: the per-frame
+/// dedupe removed).
+#[test]
+fn review_one_result_is_one_use() {
+    let mut fixture = Fixture::agent();
+    fixture.vault("api");
+    fixture.credential_note("api", "loaded", true);
+    fixture.proxy(
+        Some("api.example.test:443"),
+        true,
+        true,
+        "relayed",
+        &["api", "api"],
+    );
+    fixture.sync();
+    let summary = fixture.summary();
+    assert_eq!(facts(&summary, "credentials")["credentials"][0]["uses"], 1);
+}
+
+/// Receipt-only lines: a lost integrity and resolver refusals are said
+/// (kills: those lines removed).
+#[test]
+fn review_receipt_only_facts_are_printed() {
+    let mut fixture = every_class();
+    fixture.receipt["lifetime"]["integrity"] = json!("lost");
+    fixture.receipt["coverage"]["proxy.net"]["resolver_refused"] = json!(2);
+    let summary = fixture.summary();
+    assert!(texts(&summary)[0].contains("integrity lost: state retained"));
+    assert!(texts(&summary)[2].contains("2 refused for resolver capacity, not policy"));
+}
+
+/// A file of exactly the cap is read; one byte more is not (kills: `>` made
+/// `>=` in `read_bounded`).
+#[test]
+fn review_the_scan_cap_is_inclusive() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let temp = common::private_tempdir();
+    let attempt = temp.path().join("att");
+    std::fs::create_dir(&attempt).unwrap();
+    std::fs::set_permissions(&attempt, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(attempt.join("f"), b"0123456789").unwrap();
+    assert!(matches!(
+        ukai_jail::journal::read_bounded(&attempt, "f", 10),
+        ukai_jail::journal::Bounded::Bytes(bytes) if bytes.len() == 10
+    ));
+    assert!(matches!(
+        ukai_jail::journal::read_bounded(&attempt, "f", 9),
+        ukai_jail::journal::Bounded::TooLarge(10)
+    ));
+}
+
+/// K53 (adversarial review F6): a head begun and not confirmed sent may
+/// have carried the credential, so the use count becomes a lower bound and
+/// says how many such results there were.
+#[test]
+fn k53_unconfirmed_uses_make_the_count_a_lower_bound() {
+    let mut fixture = clean_agent();
+    fixture.unconfirmed("api.example.test:443", &["api"]);
+    fixture.sync();
+    fixture.at(223_000_000_000);
+    let summary = fixture.summary();
+    assert_eq!(
+        texts(&summary)[3],
+        "credential api: vault, never staged · used on at least 3 proxy results (+1 not \
+         confirmed sent) · 0 credential refusals"
+    );
+    let api = &facts(&summary, "credentials")["credentials"][0];
+    assert_eq!(api["uses_bound"], "at_least");
+    assert_eq!(api["unconfirmed"], 1);
+    assert!(
+        common::validators()["jail-summary"].is_valid(&summary.to_json()),
+        "{:#}",
+        summary.to_json()
+    );
+}
+
+/// Only the two actions an `fs.write` result can carry open a path for
+/// writing (jail-v1 §11.2); any other is not counted.
+#[test]
+fn review_an_fs_write_of_another_action_opens_nothing() {
+    let mut fixture = every_class();
+    fixture.audit(
+        "fs.write",
+        true,
+        json!({"path": Fixture::named("not-opened"), "action": "content_changed"}),
+    );
+    fixture.sync();
+    fixture.at(223_000_000_000);
+    let summary = fixture.summary();
+    assert_eq!(facts(&summary, "workspace")["bound"], "exact");
+    assert_eq!(facts(&summary, "workspace")["opened_for_writing"], 3);
+}
+
+/// `fs.write` degraded, so an incomplete journal's write counts print.
+fn degraded_writes(fixture: &mut Fixture) {
+    fixture.receipt["coverage"]["fs.write"] = json!({
+        "status": "degraded", "sources": ["audit"], "observed_count": null,
+        "gaps": [{"classes": ["fs.write"], "source": "audit", "start_ns": "0",
+                  "end_ns": null, "reason": "queue_full", "lost_count": null}],
+    });
+}
+
+/// A frame without its sequence number ends what is counted: nothing after
+/// it is evidence, however it is numbered.
+#[test]
+fn nothing_after_an_unsequenced_frame_is_counted() {
+    let mut fixture = every_class();
+    degraded_writes(&mut fixture);
+    fixture.open_write("unsequenced");
+    let last = fixture.events.len() - 1;
+    fixture.events[last]
+        .as_object_mut()
+        .unwrap()
+        .remove("source_seq");
+    fixture.open_write("after");
+    let summary = fixture.summary_of(&fixture.journal_without_note());
+    assert_eq!(facts(&summary, "workspace")["opened_for_writing"], 3);
+}
+
+/// A JSON array is no frame, even one whose positions spell a frame of this
+/// attempt with a fresh source and sequence number.
+#[test]
+fn an_array_spelling_a_frame_is_not_one() {
+    let fixture = every_class();
+    let mut bytes = Fixture::lines_of(&fixture.events);
+    bytes.extend(format!("[\"{ATTEMPT}\",\"other\",1]\n").as_bytes());
+    bytes.extend(Fixture::lines_of(std::slice::from_ref(
+        &fixture.final_note(),
+    )));
+    assert_eq!(fixture.summary_of(&bytes).journal, JournalState::Incomplete);
+}
+
+/// "No gaps" is a claim about an attached observer only.
+#[test]
+fn no_gaps_needs_an_attached_observer() {
+    let mut fixture = every_class();
+    fixture.receipt["observer"]["attached"] = json!(false);
+    let evidence = texts(&fixture.summary())[4].clone();
+    assert!(!evidence.contains("no gaps"), "{evidence}");
+    assert!(evidence.contains("observer not attached"), "{evidence}");
+}
+
+/// A class status this build does not know claims nothing: it is reported
+/// as `unknown` and its numbers are not observed.
+#[test]
+fn an_unknown_class_status_claims_nothing() {
+    let mut fixture = every_class();
+    fixture.receipt["coverage"]["fs.write"]["status"] = json!("bogus");
+    let summary = fixture.summary();
+    assert_eq!(
+        facts(&summary, "evidence")["classes"]["fs.write"],
+        "unknown"
+    );
+    assert_eq!(facts(&summary, "workspace")["bound"], "not_observed");
+    assert!(
+        common::validators()["jail-summary"].is_valid(&summary.to_json()),
+        "{:#}",
+        summary.to_json()
+    );
+}
+
+/// An empty tree is verified for the scope a contained run states, or for
+/// the registered cgroup; any other scope verifies nothing.
+#[test]
+fn survivors_are_verified_only_for_a_known_scope() {
+    for scope in [Value::Null, json!("process_group")] {
+        let mut fixture = every_class();
+        fixture.receipt["lifetime"]["verification_scope"] = scope.clone();
+        let status = texts(&fixture.summary())[0].clone();
+        assert!(
+            status.contains("survivors: NOT verified"),
+            "{scope}: {status}"
+        );
+    }
+}
+
+/// A lower bound prints only what was seen: no `at least 0`.
+#[test]
+fn a_lower_bound_prints_only_what_was_seen() {
+    let mut fixture = Fixture::agent();
+    degraded_writes(&mut fixture);
+    fixture.unlink("gone");
+    let summary = fixture.summary_of(&fixture.journal_without_note());
+    assert_eq!(texts(&summary)[1], "workspace: at least 1 removed");
+    let mut empty = Fixture::agent();
+    degraded_writes(&mut empty);
+    let summary = empty.summary_of(&empty.journal_without_note());
+    assert_eq!(
+        texts(&summary)[1],
+        "workspace: none recorded (a lower bound)"
     );
 }

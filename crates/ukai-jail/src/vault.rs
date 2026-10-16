@@ -1253,6 +1253,139 @@ mod tests {
         assert!(event.credentials.is_empty());
     }
 
+    /// K53 (adversarial review F1): the TLS lane forwards the substituted
+    /// head, then the client closes before the declared body is complete.
+    /// The credential reached the upstream, so the result is an allowed
+    /// request that names it, with the failure as its reason, never a
+    /// denial.
+    #[test]
+    fn k53_a_tls_request_ended_after_its_head_was_sent_is_allowed_and_named() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let generated = rcgen::generate_simple_self_signed(vec!["fixture.test".into()]).unwrap();
+        let trusted_cert = generated.cert.der().clone();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![trusted_cert.clone()],
+            rustls::pki_types::PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der())
+                .into(),
+        )
+        .unwrap();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut stream = rustls::StreamOwned::new(
+                rustls::ServerConnection::new(Arc::new(config)).unwrap(),
+                socket,
+            );
+            head(&mut stream).unwrap_or_default()
+        });
+        let mut vault = vault_of(
+            policy(&[&format!("https://fixture.test:{port}")]),
+            b"Bearer fixture-secret",
+        );
+        vault.client = roots(trusted_cert);
+        let client_config = roots(vault.ca.der().clone());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("proxy.sock");
+        let resolver = FixtureResolver::new();
+        resolver.script(
+            "fixture.test",
+            vec![FixtureAnswer::Addresses(vec!["127.0.0.1".parse().unwrap()])],
+        );
+        let (sender, receiver) = mpsc::channel();
+        let proxy = proxy::start_with_vault(
+            ProxyConfig {
+                listener: UnixListener::bind(&path).unwrap(),
+                rules: Rules::from_strings(
+                    &[format!("fixture.test:{port}"), format!("127.0.0.1:{port}")],
+                    &[],
+                )
+                .unwrap(),
+                budgets: Budgets::default(),
+                resolver: Arc::new(resolver),
+            },
+            Arc::new(Sink(Mutex::new(sender))),
+            Some(Arc::new(vault)),
+        )
+        .unwrap();
+        let mut socket = UnixStream::connect(path).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        socket
+            .write_all(&origin::preamble_for(
+                ([127, 0, 0, 1], 40000).into(),
+                HTTP_PORT,
+            ))
+            .unwrap();
+        write!(
+            socket,
+            "CONNECT fixture.test:{port} HTTP/1.1\r\nHost: fixture.test:{port}\r\n\r\n"
+        )
+        .unwrap();
+        assert!(head(&mut socket).unwrap().starts_with(b"HTTP/1.1 200"));
+        let mut child = rustls::StreamOwned::new(
+            rustls::ClientConnection::new(
+                client_config,
+                rustls::pki_types::ServerName::try_from("fixture.test").unwrap(),
+            )
+            .unwrap(),
+            socket,
+        );
+        child
+            .write_all(
+                format!(
+                    "POST / HTTP/1.1\r\nHost: fixture.test:{port}\r\nAuthorization: \
+                     vault:test-attempt:api\r\nContent-Length: 100\r\n\r\nabcde"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        child.flush().unwrap();
+        child.conn.send_close_notify();
+        child.flush().unwrap();
+        let _ = child.sock.shutdown(std::net::Shutdown::Write);
+        let mut response = Vec::new();
+        let _ = child.read_to_end(&mut response);
+        let event = receiver.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert!(proxy.stop(Duration::from_secs(10)).complete());
+        let upstream = server.join().unwrap();
+        let frame = recorded(&event);
+        assert!(upstream.windows(14).any(|s| s == b"fixture-secret"));
+        assert_eq!(frame["decision"], "allow", "{frame}");
+        assert_eq!(frame["fields"]["reason"], "client_closed", "{frame}");
+        assert_eq!(frame["fields"]["credentials"], serde_json::json!(["api"]));
+        assert!(frame["fields"].get("credentials_unconfirmed").is_none());
+    }
+
+    /// K53: a recorded result names its credentials, sent and unconfirmed,
+    /// sorted and once, whatever the result held.
+    #[test]
+    fn k53_a_recorded_result_sorts_and_dedupes_its_credentials() {
+        let (mut event, _) = run_plain(|port| {
+            format!("GET http://fixture.test:{port}/ HTTP/1.1\r\nHost: fixture.test:{port}\r\n\r\n")
+        });
+        event.credentials = vec!["zeta".to_owned(), "api".to_owned(), "zeta".to_owned()];
+        event.credentials_unconfirmed = vec!["b".to_owned(), "a".to_owned(), "b".to_owned()];
+        let frame = recorded(&event);
+        assert_eq!(
+            frame["fields"]["credentials"],
+            serde_json::json!(["api", "zeta"])
+        );
+        assert_eq!(
+            frame["fields"]["credentials_unconfirmed"],
+            serde_json::json!(["a", "b"])
+        );
+    }
+
     /// K53: the ids a lease names are sorted and unique, whatever order and
     /// how often the head carried them.
     #[test]

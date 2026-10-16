@@ -60,12 +60,10 @@ const AUDIT_CLASSES: [&str; 4] = ["exec", "fs.write", "fs.deny", "net"];
 pub enum Journal<'a> {
     /// The local `trace.ndjson`, whole (at most [`SCAN_CAP`] bytes).
     Bytes(&'a [u8]),
-    /// `--trace-fd N`: the events went to that descriptor and no local
-    /// journal was kept (jail-v1 §13.3). Only the live run knows this.
-    Streamed(i32),
     /// The local journal is larger than [`SCAN_CAP`]: its size in bytes.
     NotScanned(u64),
-    /// No local journal exists.
+    /// No local journal exists: none was kept (`--trace-fd` streams the
+    /// events to a descriptor instead, jail-v1 §13.3), or it was removed.
     Absent,
     /// A local journal exists and could not be read.
     Unreadable,
@@ -80,8 +78,6 @@ pub enum JournalState {
     /// Read, but not complete: a partial or corrupt line, or no final note
     /// naming this receipt. Every count from it is a lower bound.
     Incomplete,
-    /// Streamed to a descriptor (`--trace-fd`).
-    Streamed(i32),
     /// Over the scan cap, by its size in bytes.
     NotScanned(u64),
     /// No local journal.
@@ -97,7 +93,6 @@ impl JournalState {
         match self {
             JournalState::Complete => "complete",
             JournalState::Incomplete => "incomplete",
-            JournalState::Streamed(_) => "streamed",
             JournalState::NotScanned(_) => "not_scanned",
             JournalState::Absent => "absent",
             JournalState::Unreadable => "unreadable",
@@ -108,12 +103,14 @@ impl JournalState {
     fn missing(self) -> Option<String> {
         match self {
             JournalState::Complete | JournalState::Incomplete => None,
-            JournalState::Streamed(fd) => Some(format!("journal streamed to fd {fd}")),
             JournalState::NotScanned(bytes) => Some(format!(
                 "journal not scanned ({} MiB)",
                 bytes.div_ceil(1024 * 1024)
             )),
-            JournalState::Absent => Some("journal absent".to_owned()),
+            // The attempt directory cannot say why (`--trace-fd`, or a
+            // removed file), and a live run and a later `tail --summary`
+            // must print the same words, so neither says more.
+            JournalState::Absent => Some("no local journal".to_owned()),
             JournalState::Unreadable => Some("journal unreadable".to_owned()),
         }
     }
@@ -207,20 +204,57 @@ pub fn json_text(value: &Value) -> String {
 // The journal scan
 // ---------------------------------------------------------------------------
 
+/// A JSON string borrowed from the frame's bytes, or owned only when it
+/// holds an escape: a frame's strings are read without an allocation each.
+struct Str<'a>(Cow<'a, str>);
+
+impl std::ops::Deref for Str<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for Str<'a> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visit<'a>(std::marker::PhantomData<&'a ()>);
+        impl<'de: 'a, 'a> serde::de::Visitor<'de> for Visit<'a> {
+            type Value = Str<'a>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_borrowed_str<E: serde::de::Error>(self, text: &'de str) -> Result<Str<'a>, E> {
+                Ok(Str(Cow::Borrowed(text)))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Str<'a>, E> {
+                Ok(Str(Cow::Owned(text.to_owned())))
+            }
+        }
+        deserializer.deserialize_str(Visit(std::marker::PhantomData))
+    }
+}
+
 /// The parts of one journal frame the summary reads. Every other field is
-/// skipped unparsed, which keeps an A01-sized journal within the cost budget.
+/// skipped unparsed and every string is borrowed where it can be, which
+/// keeps an A01-sized journal within the cost budget.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct Frame<'a> {
     #[serde(borrow)]
-    source: Option<Cow<'a, str>>,
+    attempt_id: Option<Str<'a>>,
+    #[serde(borrow)]
+    source: Option<Str<'a>>,
     source_seq: Option<u64>,
     #[serde(borrow)]
-    operation: Option<Cow<'a, str>>,
+    operation: Option<Str<'a>>,
     #[serde(borrow)]
-    decision: Option<Cow<'a, str>>,
+    decision: Option<Str<'a>>,
     #[serde(borrow)]
-    monotonic_ns: Option<Cow<'a, str>>,
+    monotonic_ns: Option<Str<'a>>,
     outcome: Option<FrameOutcome>,
     #[serde(borrow)]
     fields: Option<FrameFields<'a>>,
@@ -236,56 +270,171 @@ struct FrameOutcome {
 #[serde(default)]
 struct FrameFields<'a> {
     #[serde(borrow)]
-    kind: Option<Cow<'a, str>>,
+    kind: Option<Str<'a>>,
     #[serde(borrow)]
-    transition: Option<Cow<'a, str>>,
+    transition: Option<Str<'a>>,
     #[serde(borrow)]
-    phase: Option<Cow<'a, str>>,
+    phase: Option<Str<'a>>,
     #[serde(borrow)]
-    receipt_digest: Option<Cow<'a, str>>,
+    receipt_digest: Option<Str<'a>>,
     #[serde(borrow)]
-    action: Option<Cow<'a, str>>,
+    action: Option<Str<'a>>,
     #[serde(borrow)]
-    attempted_operation: Option<Cow<'a, str>>,
+    attempted_operation: Option<Str<'a>>,
     #[serde(borrow)]
-    destination: Option<Cow<'a, str>>,
+    destination: Option<Str<'a>>,
     #[serde(borrow)]
-    reason: Option<Cow<'a, str>>,
+    reason: Option<Str<'a>>,
     #[serde(borrow)]
-    credential_id: Option<Cow<'a, str>>,
+    credential_id: Option<Str<'a>>,
     uses_recorded: Option<bool>,
     #[serde(borrow)]
-    credentials: Option<Vec<Cow<'a, str>>>,
-    path: Option<FramePath>,
-    path2: Option<FramePath>,
+    credentials: Option<Vec<Str<'a>>>,
+    #[serde(borrow)]
+    credentials_unconfirmed: Option<Vec<Str<'a>>>,
+    #[serde(borrow)]
+    path: Option<FramePath<'a>>,
+    #[serde(borrow)]
+    path2: Option<FramePath<'a>>,
 }
 
 /// An event path (`$defs/path`): its kind, and its value when it is named.
 #[derive(Deserialize)]
-struct FramePath {
-    kind: String,
-    value: Option<Value>,
+struct FramePath<'a> {
+    #[serde(borrow)]
+    kind: Str<'a>,
+    #[serde(borrow, default)]
+    value: Option<PathValue<'a>>,
 }
 
-impl FramePath {
-    /// The `{kind, value}` of a named workspace path, and its distinctness
-    /// key (the value's JSON spelling: a string, or the base64 object of a
-    /// non-UTF-8 name).
-    fn workspace(&self) -> Option<(String, Value)> {
-        if self.kind != "workspace_relative" {
+/// A path's name (`$defs/native_string`): UTF-8 text, or the base64 of
+/// bytes that are not UTF-8.
+enum PathValue<'a> {
+    Text(Str<'a>),
+    Encoded(String),
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for PathValue<'a> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visit<'a>(std::marker::PhantomData<&'a ()>);
+        impl<'de: 'a, 'a> serde::de::Visitor<'de> for Visit<'a> {
+            type Value = PathValue<'a>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a native string")
+            }
+
+            fn visit_borrowed_str<E: serde::de::Error>(
+                self,
+                text: &'de str,
+            ) -> Result<PathValue<'a>, E> {
+                Ok(PathValue::Text(Str(Cow::Borrowed(text))))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<PathValue<'a>, E> {
+                Ok(PathValue::Text(Str(Cow::Owned(text.to_owned()))))
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<PathValue<'a>, M::Error> {
+                let (mut encoding, mut data) = (None::<String>, None::<String>);
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "encoding" => encoding = Some(map.next_value()?),
+                        "data" => data = Some(map.next_value()?),
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                match (encoding.as_deref(), data) {
+                    (Some("base64"), Some(data)) => Ok(PathValue::Encoded(data)),
+                    _ => Err(serde::de::Error::custom("not a native string")),
+                }
+            }
+        }
+        deserializer.deserialize_any(Visit(std::marker::PhantomData))
+    }
+}
+
+impl FramePath<'_> {
+    /// The name of a named workspace path.
+    fn workspace(&self) -> Option<&PathValue<'_>> {
+        if &*self.kind != "workspace_relative" {
             return None;
         }
-        let value = self.value.as_ref()?;
-        Some((
-            value.to_string(),
-            json!({"kind": "workspace_relative", "value": value}),
-        ))
+        self.value.as_ref()
     }
 
     /// Whether the event recorded no name for this path (§4.2's unnamed:
     /// `unavailable`, or a `digest` outside every known root).
     fn unnamed(&self) -> bool {
-        matches!(self.kind.as_str(), "unavailable" | "digest")
+        matches!(&*self.kind, "unavailable" | "digest")
+    }
+}
+
+/// A path seen opened for writing.
+const OPENED: u8 = 1;
+/// A path seen on either side of a rename.
+const RENAMED: u8 = 2;
+/// A path seen removed.
+const REMOVED: u8 = 4;
+
+/// Distinct named workspace paths, each with the ways it was seen. A name is
+/// allocated once, the first time it is seen.
+#[derive(Default)]
+struct Paths {
+    /// By UTF-8 name.
+    text: std::collections::HashMap<String, u8>,
+    /// By the base64 of a name that is not UTF-8.
+    encoded: std::collections::HashMap<String, u8>,
+}
+
+impl Paths {
+    fn mark(&mut self, name: &PathValue<'_>, how: u8) {
+        let (map, key) = match name {
+            PathValue::Text(text) => (&mut self.text, &**text),
+            PathValue::Encoded(data) => (&mut self.encoded, data.as_str()),
+        };
+        if let Some(seen) = map.get_mut(key) {
+            *seen |= how;
+        } else {
+            map.insert(key.to_owned(), how);
+        }
+    }
+
+    /// Distinct paths seen in the way `how`.
+    fn count(&self, how: u8) -> u64 {
+        self.text
+            .values()
+            .chain(self.encoded.values())
+            .filter(|seen| **seen & how != 0)
+            .count() as u64
+    }
+
+    fn len(&self) -> usize {
+        self.text.len() + self.encoded.len()
+    }
+
+    /// The first `limit` paths in a stable order (UTF-8 names sorted, then
+    /// the others), each in the event schema's `{kind, value}` form.
+    fn listed(&self, limit: usize) -> Vec<Value> {
+        let mut text: Vec<&String> = self.text.keys().collect();
+        text.sort();
+        let mut encoded: Vec<&String> = self.encoded.keys().collect();
+        encoded.sort();
+        text.into_iter()
+            .map(|name| json!({"kind": "workspace_relative", "value": name}))
+            .chain(encoded.into_iter().map(|data| {
+                json!({
+                    "kind": "workspace_relative",
+                    "value": {"encoding": "base64", "data": data},
+                })
+            }))
+            .take(limit)
+            .collect()
     }
 }
 
@@ -316,13 +465,9 @@ struct Allowed {
 struct Scan {
     /// Frames per class (the K47 totals).
     class_counts: BTreeMap<&'static str, u64>,
-    /// Distinct workspace paths opened for writing, renamed (either side),
-    /// removed, by distinctness key.
-    opened: BTreeSet<String>,
-    renamed: BTreeSet<String>,
-    removed: BTreeSet<String>,
-    /// Every named workspace path above, for the JSON list.
-    named: BTreeMap<String, Value>,
+    /// Distinct workspace paths opened for writing, renamed (either side)
+    /// and removed.
+    paths: Paths,
     /// Successful write-class results with a path that has no name.
     unnamed: u64,
     /// `fs.deny` results whose attempted operation is a file write.
@@ -334,11 +479,14 @@ struct Scan {
     denied: BTreeMap<(Option<String>, String), u64>,
     /// Proxy results whose `fields.credentials` names each id.
     uses: BTreeMap<String, u64>,
+    /// Proxy results whose `fields.credentials_unconfirmed` names each id:
+    /// a head begun and not confirmed sent, which may have carried it.
+    unconfirmed: BTreeMap<String, u64>,
     /// Credential ids whose lifecycle notes say this build records uses.
     uses_recorded: BTreeSet<String>,
     /// Each credential's distinct lifecycle transitions, in journal order.
     transitions: BTreeMap<String, Vec<String>>,
-    /// Proxy results refused for a `credential_*` reason.
+    /// Proxy results denied for a `credential_*` reason.
     credential_refusals: u64,
     /// The first `exec_confirmed` lifecycle note's clock.
     exec_confirmed_ns: Option<u128>,
@@ -360,7 +508,7 @@ struct Scan {
     broken: bool,
 }
 
-fn scan(bytes: &[u8]) -> Scan {
+fn scan(bytes: &[u8], attempt_id: &str) -> Scan {
     let mut scan = Scan::default();
     let mut frames = crate::journal::frames(bytes);
     for line in frames.by_ref() {
@@ -375,6 +523,11 @@ fn scan(bytes: &[u8]) -> Scan {
             scan.broken = true;
             return scan;
         };
+        // A frame of another attempt is not this attempt's evidence.
+        if frame.attempt_id.as_deref() != Some(attempt_id) {
+            scan.broken = true;
+            return scan;
+        }
         // jail-v1 §13.1: one writer numbers each source from 1, strictly
         // increasing. A number that does not increase is a repeated or
         // reordered frame, which no conforming writer produces: nothing from
@@ -415,7 +568,11 @@ impl Scan {
         if seq != last + 1 && !self.loss_recorded {
             self.unrecorded_hole = true;
         }
-        self.last_seq.insert(source.to_owned(), seq);
+        if let Some(known) = self.last_seq.get_mut(source) {
+            *known = seq;
+        } else {
+            self.last_seq.insert(source.to_owned(), seq);
+        }
         true
     }
 
@@ -468,17 +625,15 @@ impl Scan {
         if paths.iter().any(|path| path.unnamed()) {
             self.unnamed += 1;
         }
+        let how = match operation {
+            "fs.rename" => RENAMED,
+            "fs.unlink" => REMOVED,
+            _ => OPENED,
+        };
         for path in paths {
-            let Some((key, value)) = path.workspace() else {
-                continue;
-            };
-            let set = match operation {
-                "fs.rename" => &mut self.renamed,
-                "fs.unlink" => &mut self.removed,
-                _ => &mut self.opened,
-            };
-            set.insert(key.clone());
-            self.named.entry(key).or_insert(value);
+            if let Some(name) = path.workspace() {
+                self.paths.mark(name, how);
+            }
         }
     }
 
@@ -500,13 +655,19 @@ impl Scan {
                     .or_insert(0) += 1;
             }
         }
-        if reason.starts_with("credential_") {
+        // A refusal is a request the proxy denied for a credential reason;
+        // one it allowed and sent, then ended for one (a revocation in
+        // flight), was a use, not a refusal.
+        if frame.decision.as_deref() == Some("deny") && reason.starts_with("credential_") {
             self.credential_refusals += 1;
         }
-        if let Some(ids) = &fields.credentials {
-            let distinct: BTreeSet<&str> = ids.iter().map(|id| id.as_ref()).collect();
+        for (ids, counts) in [
+            (&fields.credentials, &mut self.uses),
+            (&fields.credentials_unconfirmed, &mut self.unconfirmed),
+        ] {
+            let distinct: BTreeSet<&str> = ids.iter().flatten().map(|id| &**id).collect();
             for id in distinct {
-                *self.uses.entry(id.to_owned()).or_insert(0) += 1;
+                *counts.entry(id.to_owned()).or_insert(0) += 1;
             }
         }
     }
@@ -604,11 +765,18 @@ fn classify(receipt: &Value, scan: Option<&Scan>, state: JournalState) -> Vec<Cl
         .iter()
         .map(|&name| {
             let coverage = receipt.pointer(&format!("/coverage/{name}"));
-            let status = coverage
-                .and_then(|c| c.get("status"))
-                .and_then(Value::as_str)
-                .unwrap_or("unsupported")
-                .to_owned();
+            // A status this build does not know is reported as `unknown` and
+            // claims nothing; a class the receipt does not mention was not
+            // observed.
+            const KNOWN: [&str; 4] = ["supported", "active", "degraded", "unsupported"];
+            let status = match coverage.and_then(|c| c.get("status")) {
+                None => "unsupported",
+                Some(status) => KNOWN
+                    .into_iter()
+                    .find(|known| status.as_str() == Some(known))
+                    .unwrap_or("unknown"),
+            }
+            .to_owned();
             let observed = coverage
                 .and_then(|c| c.get("observed_count"))
                 .and_then(Value::as_u64);
@@ -668,9 +836,10 @@ pub fn summary(receipt: &Value, journal: Journal<'_>) -> Summary {
     let receipt_digest = crate::canonical::to_jcs(receipt)
         .ok()
         .map(|bytes| crate::canonical::sha256_prefixed(&bytes));
+    let attempt_id = text(receipt, "/attempt_id").unwrap_or_default();
     let (scan, state) = match journal {
         Journal::Bytes(bytes) => {
-            let scan = scan(bytes);
+            let scan = scan(bytes, attempt_id);
             let complete = !scan.broken
                 && !scan.unrecorded_hole
                 && match (&scan.last_receipt_note, &receipt_digest) {
@@ -684,16 +853,23 @@ pub fn summary(receipt: &Value, journal: Journal<'_>) -> Summary {
             };
             (Some(scan), state)
         }
-        Journal::Streamed(fd) => (None, JournalState::Streamed(fd)),
         Journal::NotScanned(size) => (None, JournalState::NotScanned(size)),
         Journal::Absent => (None, JournalState::Absent),
         Journal::Unreadable => (None, JournalState::Unreadable),
     };
+    // An intact journal whose last note names a receipt other than this one:
+    // the receipt was rewritten after the journal ended (`gc` records a
+    // cleanup that way), so the journal is not this receipt's.
+    let another_receipt = state == JournalState::Incomplete
+        && scan.as_ref().is_some_and(|scan| {
+            !scan.broken && !scan.unrecorded_hole && scan.last_receipt_note.is_some()
+        });
     let classes = classify(receipt, scan.as_ref(), state);
     let view = View {
         receipt,
         scan: scan.as_ref(),
         state,
+        another_receipt,
         classes: &classes,
     };
     let mut lines = vec![view.status(), view.workspace(), view.network()];
@@ -702,7 +878,7 @@ pub fn summary(receipt: &Value, journal: Journal<'_>) -> Summary {
     lines.extend(view.limits());
     lines.extend(view.cleanup());
     Summary {
-        attempt_id: text(receipt, "/attempt_id").unwrap_or_default().to_owned(),
+        attempt_id: attempt_id.to_owned(),
         receipt_digest,
         journal: state,
         lines,
@@ -714,9 +890,29 @@ fn text<'a>(value: &'a Value, pointer: &str) -> Option<&'a str> {
     value.pointer(pointer).and_then(Value::as_str)
 }
 
-/// An escaped evidence string, for a terminal line.
+/// An escaped evidence string, for a terminal line: what
+/// [`escape_control`] escapes, and the invisible separators and format
+/// characters that would hide or fake text in a summary line.
 fn shown(value: &str) -> String {
-    escape_control(value)
+    let mut out = String::with_capacity(value.len());
+    for character in escape_control(value).chars() {
+        if invisible(character) {
+            let _ = write!(out, "<U+{:04X}>", u32::from(character));
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
+/// Line and paragraph separators, zero-width and word-joiner characters,
+/// the byte-order mark and the tag characters.
+fn invisible(character: char) -> bool {
+    matches!(
+        character,
+        '\u{2028}' | '\u{2029}' | '\u{200B}'..='\u{200D}' | '\u{2060}'..='\u{2064}'
+            | '\u{FEFF}' | '\u{E0000}'..='\u{E007F}'
+    )
 }
 
 /// `items`, at most [`TERMINAL_LIST`] of them, then `+N more`.
@@ -820,6 +1016,7 @@ struct View<'a> {
     receipt: &'a Value,
     scan: Option<&'a Scan>,
     state: JournalState,
+    another_receipt: bool,
     classes: &'a [Class],
 }
 
@@ -900,7 +1097,7 @@ impl View<'_> {
                 parts.push("survivors: none (verified, registered cgroup only)".to_owned());
                 "none_verified_registered_boundary"
             }
-            (Some(true), _) => {
+            (Some(true), Some("attempt_tree")) => {
                 parts.push("survivors: none (verified)".to_owned());
                 "none_verified"
             }
@@ -968,9 +1165,9 @@ impl View<'_> {
         let empty = Scan::default();
         let scan = self.scan.unwrap_or(&empty);
         let (opened, renamed, removed) = (
-            scan.opened.len() as u64,
-            scan.renamed.len() as u64,
-            scan.removed.len() as u64,
+            scan.paths.count(OPENED),
+            scan.paths.count(RENAMED),
+            scan.paths.count(REMOVED),
         );
         let text = match write {
             Claim::NotObserved if observe_off => "not observed (--observe off)".to_owned(),
@@ -978,16 +1175,26 @@ impl View<'_> {
             Claim::NoJournal => self.state.missing().unwrap_or_default(),
             Claim::Disagree => "journal and receipt disagree on fs.write".to_owned(),
             Claim::Exact | Claim::AtLeast => {
-                let mut text = format!(
-                    "{} {} opened for writing",
-                    write.number(opened),
-                    noun(opened, "path", "paths")
-                );
+                // An exact zero is a finding; a lower bound of zero says
+                // nothing, so a lower bound prints only what was seen.
+                let mut seen = Vec::new();
+                if opened > 0 || write == Claim::Exact {
+                    seen.push(format!(
+                        "{} {} opened for writing",
+                        write.number(opened),
+                        noun(opened, "path", "paths")
+                    ));
+                }
                 for (n, what) in [(renamed, "in renames"), (removed, "removed")] {
                     if n > 0 {
-                        let _ = write!(text, ", {} {what}", write.number(n));
+                        seen.push(format!("{} {what}", write.number(n)));
                     }
                 }
+                let mut text = if seen.is_empty() {
+                    "none recorded (a lower bound)".to_owned()
+                } else {
+                    seen.join(", ")
+                };
                 if scan.unnamed > 0 {
                     let _ = write!(
                         text,
@@ -1018,13 +1225,13 @@ impl View<'_> {
             }
             _ => {}
         }
-        let paths: Vec<&Value> = if write.counts() {
-            scan.named.values().take(JSON_LIST).collect()
+        let paths: Vec<Value> = if write.counts() {
+            scan.paths.listed(JSON_LIST)
         } else {
             Vec::new()
         };
         let omitted = if write.counts() {
-            scan.named.len().saturating_sub(JSON_LIST)
+            scan.paths.len().saturating_sub(JSON_LIST)
         } else {
             0
         };
@@ -1223,12 +1430,28 @@ impl View<'_> {
                         (Value::Null, "not_recorded")
                     }
                     Claim::Exact | Claim::AtLeast => {
-                        let _ = write!(
-                            part,
-                            " · used on {} {}",
-                            claim.number(uses),
-                            noun(uses, "proxy result", "proxy results")
-                        );
+                        // A head begun and not confirmed sent may have
+                        // carried the value: the count is then a lower
+                        // bound, and says how many such results there were.
+                        let unconfirmed = scan.unconfirmed.get(id).copied().unwrap_or(0);
+                        let claim = if unconfirmed > 0 {
+                            Claim::AtLeast
+                        } else {
+                            claim
+                        };
+                        if claim == Claim::AtLeast && uses == 0 && unconfirmed == 0 {
+                            part.push_str(" · uses: none recorded (a lower bound)");
+                        } else {
+                            let _ = write!(
+                                part,
+                                " · used on {} {}",
+                                claim.number(uses),
+                                noun(uses, "proxy result", "proxy results")
+                            );
+                        }
+                        if unconfirmed > 0 {
+                            let _ = write!(part, " (+{unconfirmed} not confirmed sent)");
+                        }
                         (json!(uses), claim.bound())
                     }
                 }
@@ -1246,12 +1469,18 @@ impl View<'_> {
                 let _ = write!(part, " · {}", notable.join(", "));
             }
             parts.push(part);
+            let unconfirmed = if uses.is_null() {
+                Value::Null
+            } else {
+                json!(scan.unconfirmed.get(id).copied().unwrap_or(0))
+            };
             facts.push(json!({
                 "id": id,
                 "mode": mode,
                 "never_staged": never_staged,
                 "uses": uses,
                 "uses_bound": uses_bound,
+                "unconfirmed": unconfirmed,
                 "transitions": transitions,
             }));
         }
@@ -1325,7 +1554,15 @@ impl View<'_> {
                 .pointer("/observer/gaps")
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
-            if active == CLASSES.len() && self.state == JournalState::Complete && observer_gaps == 0
+            let attached = self
+                .receipt
+                .pointer("/observer/attached")
+                .and_then(Value::as_bool)
+                != Some(false);
+            if active == CLASSES.len()
+                && self.state == JournalState::Complete
+                && observer_gaps == 0
+                && attached
             {
                 parts.push(format!(
                     "{active}/{} classes active, no gaps",
@@ -1394,6 +1631,12 @@ impl View<'_> {
         }
         match self.state {
             JournalState::Complete => {}
+            JournalState::Incomplete if self.another_receipt => {
+                parts.push(
+                    "journal ends on another receipt's note: counts above are lower bounds"
+                        .to_owned(),
+                );
+            }
             JournalState::Incomplete => {
                 parts.push("journal incomplete: counts above are lower bounds".to_owned());
             }
@@ -1512,12 +1755,10 @@ pub fn receipt_path(attempt: &Path) -> std::path::PathBuf {
 }
 
 /// Reads an attempt's canonical receipt and journal and summarizes them.
-/// `streamed` is the `--trace-fd` the live run used, when it used one: only
-/// the run knows it, and no local journal exists then.
 ///
 /// # Errors
 /// The receipt cannot be read, is too large, or is not JSON.
-pub fn summarize_attempt(attempt: &Path, streamed: Option<i32>) -> Result<Summary, String> {
+pub fn summarize_attempt(attempt: &Path) -> Result<Summary, String> {
     use crate::journal::{Bounded, read_bounded};
     let receipt_bytes = match read_bounded(
         attempt,
@@ -1533,9 +1774,6 @@ pub fn summarize_attempt(attempt: &Path, streamed: Option<i32>) -> Result<Summar
     };
     let receipt: Value = serde_json::from_slice(&receipt_bytes)
         .map_err(|error| format!("{}: {error}", receipt_path(attempt).display()))?;
-    if let Some(fd) = streamed {
-        return Ok(summary(&receipt, Journal::Streamed(fd)));
-    }
     Ok(match read_bounded(attempt, "trace.ndjson", SCAN_CAP) {
         Bounded::Bytes(bytes) => summary(&receipt, Journal::Bytes(&bytes)),
         Bounded::TooLarge(size) => summary(&receipt, Journal::NotScanned(size)),

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ukai:schema:jail-summary:1",
   "title": "Jail end-of-run summary",
-  "description": "jail-launch-and-summary.md §4.5 (J13): `ukai-jail tail --summary --json`. One rendering of the summary that `run` prints on a terminal, computed by one pure function from the attempt's final receipt and journal alone. Each line's text is the terminal line without its `ukai-jail: ` prefix, escaped as the terminal line is; facts carry the numbers behind it. A count is a number only when its bound is exact or at_least, and null otherwise, never 0 (not_observed: the class was not observed; unavailable: no journal to count from; disagree: the complete journal and the receipt disagree on the class's count; not_recorded: a journal from a build that did not record credential uses). The terminal's receipt line is replaced by attempt_id and receipt_digest.",
+  "description": "jail-launch-and-summary.md §4.5 (J13): `ukai-jail tail --summary --json`. One rendering of the summary that `run` prints on a terminal, computed by one pure function from the attempt's final receipt and journal alone. Each line's text is the terminal line without its `ukai-jail: ` prefix, escaped as the terminal line is; facts carry the numbers behind it. A count is a number only when its bound is exact or at_least, and null otherwise, never 0 (not_observed: the class was not observed; unavailable: no journal to count from; disagree: the complete journal and the receipt disagree on the class's count; not_recorded: a journal from a build that did not record credential uses). Only a complete journal yields an exact bound. The terminal's receipt line is replaced by attempt_id and receipt_digest. Lines appear in the order status, workspace, network, credentials, evidence, limits, cleanup (validate_contract.py checks the order).",
   "type": "object",
   "properties": {
     "schema": {
@@ -26,7 +26,6 @@
       "enum": [
         "complete",
         "incomplete",
-        "streamed",
         "not_scanned",
         "absent",
         "unreadable"
@@ -38,7 +37,107 @@
       "maxItems": 7,
       "items": {
         "$ref": "#/$defs/line"
-      }
+      },
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "line": {
+                "const": "status"
+              }
+            },
+            "required": [
+              "line"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "line": {
+                "const": "workspace"
+              }
+            },
+            "required": [
+              "line"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "line": {
+                "const": "network"
+              }
+            },
+            "required": [
+              "line"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "line": {
+                "const": "evidence"
+              }
+            },
+            "required": [
+              "line"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "line": {
+                "const": "credentials"
+              }
+            },
+            "required": [
+              "line"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 0
+        },
+        {
+          "contains": {
+            "properties": {
+              "line": {
+                "const": "limits"
+              }
+            },
+            "required": [
+              "line"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 0
+        },
+        {
+          "contains": {
+            "properties": {
+              "line": {
+                "const": "cleanup"
+              }
+            },
+            "required": [
+              "line"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 0
+        }
+      ]
     }
   },
   "required": [
@@ -49,6 +148,63 @@
     "lines"
   ],
   "additionalProperties": false,
+  "allOf": [
+    {
+      "$comment": "Only a complete journal (its last frame the note of this receipt) supports an exact count.",
+      "if": {
+        "properties": {
+          "journal": {
+            "not": {
+              "const": "complete"
+            }
+          }
+        },
+        "required": [
+          "journal"
+        ]
+      },
+      "then": {
+        "properties": {
+          "lines": {
+            "items": {
+              "properties": {
+                "facts": {
+                  "properties": {
+                    "bound": {
+                      "not": {
+                        "const": "exact"
+                      }
+                    },
+                    "refused_bound": {
+                      "not": {
+                        "const": "exact"
+                      }
+                    },
+                    "refusals_bound": {
+                      "not": {
+                        "const": "exact"
+                      }
+                    },
+                    "credentials": {
+                      "items": {
+                        "properties": {
+                          "uses_bound": {
+                            "not": {
+                              "const": "exact"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "limit": {
       "type": "object",
@@ -83,7 +239,7 @@
         "text": {
           "type": "string",
           "minLength": 1,
-          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]*$"
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u2069\\ufeff]*$"
         },
         "facts": {
           "type": "object"
@@ -206,7 +362,21 @@
                   "errors",
                   "integrity"
                 ],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "not": {
+                  "required": [
+                    "exec_to_settled_ms",
+                    "attempt_wall_ms"
+                  ],
+                  "properties": {
+                    "exec_to_settled_ms": {
+                      "type": "integer"
+                    },
+                    "attempt_wall_ms": {
+                      "type": "integer"
+                    }
+                  }
+                }
               }
             }
           }
@@ -474,6 +644,33 @@
                         }
                       }
                     }
+                  },
+                  {
+                    "if": {
+                      "properties": {
+                        "bound": {
+                          "not": {
+                            "enum": [
+                              "exact",
+                              "at_least"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "bound"
+                      ]
+                    },
+                    "then": {
+                      "properties": {
+                        "paths": {
+                          "maxItems": 0
+                        },
+                        "omitted": {
+                          "const": 0
+                        }
+                      }
+                    }
                   }
                 ]
               }
@@ -692,6 +889,18 @@
                             "not_recorded"
                           ]
                         },
+                        "unconfirmed": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
                         "transitions": {
                           "type": "array",
                           "items": {
@@ -706,6 +915,7 @@
                         "never_staged",
                         "uses",
                         "uses_bound",
+                        "unconfirmed",
                         "transitions"
                       ],
                       "additionalProperties": false,
@@ -727,6 +937,9 @@
                           "then": {
                             "properties": {
                               "uses": {
+                                "type": "integer"
+                              },
+                              "unconfirmed": {
                                 "type": "integer"
                               }
                             }
@@ -752,6 +965,30 @@
                             "properties": {
                               "uses": {
                                 "type": "null"
+                              },
+                              "unconfirmed": {
+                                "type": "null"
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "$comment": "a use count with unconfirmed results is a lower bound",
+                          "if": {
+                            "properties": {
+                              "unconfirmed": {
+                                "type": "integer",
+                                "minimum": 1
+                              }
+                            },
+                            "required": [
+                              "unconfirmed"
+                            ]
+                          },
+                          "then": {
+                            "properties": {
+                              "uses_bound": {
+                                "const": "at_least"
                               }
                             }
                           }
@@ -880,22 +1117,58 @@
                     "type": "object",
                     "properties": {
                       "exec": {
-                        "type": "string"
+                        "enum": [
+                          "supported",
+                          "active",
+                          "degraded",
+                          "unsupported",
+                          "unknown"
+                        ]
                       },
                       "fs.write": {
-                        "type": "string"
+                        "enum": [
+                          "supported",
+                          "active",
+                          "degraded",
+                          "unsupported",
+                          "unknown"
+                        ]
                       },
                       "fs.deny": {
-                        "type": "string"
+                        "enum": [
+                          "supported",
+                          "active",
+                          "degraded",
+                          "unsupported",
+                          "unknown"
+                        ]
                       },
                       "net": {
-                        "type": "string"
+                        "enum": [
+                          "supported",
+                          "active",
+                          "degraded",
+                          "unsupported",
+                          "unknown"
+                        ]
                       },
                       "proxy.net": {
-                        "type": "string"
+                        "enum": [
+                          "supported",
+                          "active",
+                          "degraded",
+                          "unsupported",
+                          "unknown"
+                        ]
                       },
                       "limits": {
-                        "type": "string"
+                        "enum": [
+                          "supported",
+                          "active",
+                          "degraded",
+                          "unsupported",
+                          "unknown"
+                        ]
                       }
                     },
                     "required": [
@@ -914,7 +1187,14 @@
                       "type": "object",
                       "properties": {
                         "class": {
-                          "type": "string"
+                          "enum": [
+                            "exec",
+                            "fs.write",
+                            "fs.deny",
+                            "net",
+                            "proxy.net",
+                            "limits"
+                          ]
                         },
                         "reason": {},
                         "lost_count": {}

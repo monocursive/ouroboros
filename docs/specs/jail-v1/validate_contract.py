@@ -191,9 +191,10 @@ def semantic_event(event):
         gap_interval(event["fields"], "$.fields", out)
     # J13: a proxy result names its substituted credentials sorted (the schema
     # states unique and non-empty; JSON Schema cannot state an order).
-    credentials = (event.get("fields") or {}).get("credentials")
-    if event.get("source") == "proxy" and isinstance(credentials, list) and credentials != sorted(credentials):
-        out.append(("proxy_credentials_sorted", "$.fields.credentials", credentials))
+    for key in ["credentials", "credentials_unconfirmed"]:
+        ids = (event.get("fields") or {}).get(key)
+        if event.get("source") == "proxy" and isinstance(ids, list) and ids != sorted(ids):
+            out.append(("proxy_credentials_sorted", f"$.fields.{key}", ids))
     return out
 
 

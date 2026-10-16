@@ -3982,5 +3982,81 @@
         "delete": true
       }
     ]
+  },
+  {
+    "name": "J13 a denied proxy result names no credential",
+    "schema": "jail-event",
+    "base": "examples/event-proxy-deny.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "credentials"
+        ],
+        "value": [
+          "api"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "J13 a denied proxy result names no unconfirmed credential",
+    "schema": "jail-event",
+    "base": "examples/event-proxy-deny.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "credentials_unconfirmed"
+        ],
+        "value": [
+          "api"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "J13 proxy credentials unconfirmed",
+    "schema": "jail-event",
+    "base": "examples/event-proxy-vault.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "credentials"
+        ],
+        "delete": true
+      },
+      {
+        "path": [
+          "fields",
+          "credentials_unconfirmed"
+        ],
+        "value": [
+          "api"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "J13 proxy credentials unconfirmed repeated",
+    "schema": "jail-event",
+    "base": "examples/event-proxy-vault.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "credentials_unconfirmed"
+        ],
+        "value": [
+          "api",
+          "api"
+        ]
+      }
+    ]
   }
 ]
