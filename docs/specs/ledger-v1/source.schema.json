@@ -1458,6 +1458,130 @@
           }
         ]
       }
+    },
+    {
+      "$comment": "jail-launch-and-summary.md §4.3 and §7 decision 5 (J13): a proxy result may name, by id only (never a value, placeholder or digest), the vault credentials whose placeholder the proxy replaced in a request head it sent upstream whole (`credentials`), and those substituted into a head it began to send without the whole of it being confirmed sent (`credentials_unconfirmed`). Each is sorted and unique (validate_contract.py checks the order) and absent when empty, so a run without a vault journals the frames it did before. A denied request was refused before any of it was sent upstream, so it carries neither.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "proxy"
+          }
+        },
+        "required": [
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "properties": {
+              "credentials": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "uniqueItems": true
+              },
+              "credentials_unconfirmed": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "uniqueItems": true
+              }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "decision": {
+                  "const": "deny"
+                }
+              },
+              "required": [
+                "decision"
+              ]
+            },
+            "then": {
+              "properties": {
+                "fields": {
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "credentials"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "credentials_unconfirmed"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "$comment": "jail-launch-and-summary.md §4.2 (J13): a credential lifecycle note may carry uses_recorded, true, when the build that wrote it names substituted credentials on its proxy results; a journal without it predates that field, and its silence is not a zero.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "wrapper"
+          },
+          "operation": {
+            "const": "note"
+          },
+          "fields": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "credential"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "fields",
+          "operation",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "credential_id",
+              "transition"
+            ],
+            "properties": {
+              "credential_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "transition": {
+                "$ref": "#/$defs/name"
+              },
+              "uses_recorded": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "$defs": {

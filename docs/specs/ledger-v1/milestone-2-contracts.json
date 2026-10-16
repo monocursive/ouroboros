@@ -69,7 +69,7 @@
     "segments.schema.json": "830f5934848c47e5fa7615af3ecfdd784b4ca7de101e0b1e286dc9e27172349b",
     "show.schema.json": "33a8562cc2ec915ccf34661d6cf50a1aea0060528f77614c43854252930f3851",
     "signer.schema.json": "b6020877d44bf2665b6fe1d1e1297506481653f9dcdd3696cc984c8c497d3f5a",
-    "source.schema.json": "9f9db23ef5515759794b1be72cae13d4de146c28536a5bc29048fb2189cf38d6",
+    "source.schema.json": "4d8351b5abb3ee0009c24e4de80ac0476c2cca9a7455f3bc578e253b194cb7ad",
     "tail-request.schema.json": "425ff12d1c491f8f5af6c4550e9f7fb853544842703cb1c9701c973b44ee4e2f",
     "tail.schema.json": "48e0021b66ce65609a4593291a752029705f0513ba2a7936aee4385e65eced52"
   }
