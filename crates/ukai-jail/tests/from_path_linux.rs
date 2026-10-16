@@ -389,6 +389,15 @@ fn k41_the_placeholder_is_under_the_agent_s_own_name() {
         "{stdout}"
     );
     assert!(!stdout.contains("UKAI_VAULT_"), "{stdout}");
+    // Every client's trust variable names the attempt's CA (review NL6).
+    for name in ["SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE"] {
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line == format!("{name}=/run/ukai/vault-ca.pem")),
+            "{name}: {stdout}"
+        );
+    }
     assert!(
         !contains(&output.stdout, secret),
         "the value reached the child"
