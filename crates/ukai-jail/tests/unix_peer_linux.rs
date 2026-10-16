@@ -30,6 +30,7 @@ use std::io::Read as _;
 use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use common::observer::Fixture;
@@ -169,6 +170,9 @@ struct Rig {
     _mediator: Option<ukai_jail::platform::linux::unixpeer::MediatorHandle>,
     sink: Arc<CollectingSink>,
     tmp: tempfile::TempDir,
+    /// The abstract name this rig's host listener is bound to, in the host
+    /// netns ([`host_abstract_name`]).
+    host_abstract: String,
     tcp_port: u16,
     ia32_ok: bool,
 }
@@ -372,8 +376,8 @@ fn start_rig() -> Option<Rig> {
     // path, which is denied too, and say nothing about aliases.
     std::fs::hard_link(&host_sock, host_dir.join("host-hardlink.sock"))
         .expect("hardlink the host socket");
-    host_listeners
-        .push(bind_listen("ukai-host-abstract", true).expect("bind the host abstract socket"));
+    let host_abstract = host_abstract_name();
+    host_listeners.push(bind_listen(&host_abstract, true).expect("bind the host abstract socket"));
 
     // Coordination socket (SEQPACKET, to match the launcher), bind-mounted
     // read-only into the sandbox at /coord.
@@ -488,9 +492,24 @@ fn start_rig() -> Option<Rig> {
         _mediator: Some(mediator),
         sink,
         tmp,
+        host_abstract,
         tcp_port,
         ia32_ok,
     })
+}
+
+/// An abstract name for one rig's host listener that no other rig holds.
+/// Abstract names are one namespace per netns, and every rig binds its host
+/// listener in the host netns while the tests of this binary run in parallel
+/// in one process: a shared name made every rig but the first fail its bind
+/// (EADDRINUSE). The pid keeps apart test processes running side by side.
+fn host_abstract_name() -> String {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    format!(
+        "ukai-host-abstract-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn bwrap_args(
@@ -779,7 +798,7 @@ fn host_pathname_sockets_and_aliases_are_unreachable_but_attempt_sockets_work() 
     // host abstract: unreachable from the attempt netns (ECONNREFUSED, the
     // duplicate cannot find it, not an EACCES from the identity gate).
     assert_eq!(
-        rig.run('a', "ukai-host-abstract"),
+        rig.run('a', &rig.host_abstract),
         libc::ECONNREFUSED.to_string(),
         "host abstract"
     );

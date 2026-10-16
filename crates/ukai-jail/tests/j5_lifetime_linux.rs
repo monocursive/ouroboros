@@ -1139,9 +1139,12 @@ os._exit(0)
 
 const BURST_SIZE: usize = 120;
 
-/// While it lives, this test process adopts orphans (it is a child
-/// subreaper), so whatever a supervisor leaves behind when it exits comes back
-/// here to be counted. Children the test already had are not counted.
+/// While it lives, this process adopts orphans (it is a child subreaper), so
+/// whatever a supervisor leaves behind when it exits comes back here to be
+/// counted. Children the process already had are not counted.
+///
+/// The flag and the list of children belong to the whole process, so only a
+/// process with no other test in it may hold one ([`l01_fork_burst_none_helper`]).
 struct Subreaper {
     before: Vec<i32>,
 }
@@ -1193,9 +1196,10 @@ impl Drop for Subreaper {
 ///
 /// `none`: the target forks 120 children, waits until every one is an
 /// unreaped zombie and exits, orphaning them to the supervisor (a child
-/// subreaper, §9.3). The supervisor must reap them all: when it exits, this
-/// test (itself a subreaper for the duration) adopts whatever it left, and
-/// nothing may be left.
+/// subreaper, §9.3). The supervisor must reap them all: when it exits, the
+/// process that started it (itself a subreaper for the duration) adopts
+/// whatever it left, and nothing may be left. That process is a helper of
+/// its own for each `--observe` value ([`l01_fork_burst_none_helper`]).
 #[test]
 fn l01_a_fork_burst_is_fully_reaped() {
     if !common::live() {
@@ -1233,34 +1237,62 @@ fn l01_a_fork_burst_is_fully_reaped() {
     );
 
     for observe in ["on", "off"] {
-        let subreaper = Subreaper::start();
-        let (jail, _) = case("none");
-        let attempt = Attempt::start(
-            jail.args(["--observe", observe]).target([
-                PYTHON,
-                "-c",
-                ORPHANS,
-                &BURST_SIZE.to_string(),
-            ]),
-            false,
-        );
-        let (run, _) = attempt.finish();
-        let left = subreaper.adopted();
-        drop(subreaper);
-        assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-        assert!(
-            run.stdout_text().contains(&format!("orphans={BURST_SIZE}")),
-            "{}",
-            run.stdout_text()
-        );
-        let receipt = final_receipt(&run);
-        assert_verified(&receipt, "registered_boundary");
-        assert!(
-            left.is_empty(),
-            "observe {observe}: the supervisor exited leaving {} process(es) unreaped: {left:?}",
-            left.len()
-        );
+        let output = common::helper_command(NONE_BURST_HELPER)
+            .env(NONE_BURST_OBSERVE, observe)
+            .output()
+            .expect("the helper runs");
+        common::assert_helper_ran(NONE_BURST_HELPER, &output);
     }
+}
+
+/// The `none` half of [`l01_a_fork_burst_is_fully_reaped`].
+const NONE_BURST_HELPER: &str = "l01_fork_burst_none_helper";
+/// The `--observe` value the helper runs with.
+const NONE_BURST_OBSERVE: &str = "UKAI_L01_BURST_OBSERVE";
+
+/// The `none` half of L01.7 for one `--observe` value, in a process whose
+/// only child is the attempt's supervisor.
+///
+/// A child subreaper is a property of the whole process, and so is its list
+/// of children. Inside the test binary every test running beside this one
+/// adds children of its own (supervisors, alive or exited and not yet
+/// waited for), and their orphans would be adopted here while the flag is
+/// set: counting every child the process did not have at the start counted
+/// those too, and reaping what was handed over could take another test's
+/// exit status. Here nothing else runs, so whatever the supervisor leaves
+/// when it exits is what it failed to reap.
+#[test]
+#[ignore = "subprocess run by l01_a_fork_burst_is_fully_reaped"]
+fn l01_fork_burst_none_helper() {
+    if !common::running_helper(NONE_BURST_HELPER) {
+        return;
+    }
+    assert!(common::live(), "the parent test found this host live");
+    let observe =
+        std::env::var(NONE_BURST_OBSERVE).unwrap_or_else(|_| panic!("{NONE_BURST_OBSERVE} is set"));
+    let subreaper = Subreaper::start();
+    let (jail, _) = case("none");
+    let attempt = Attempt::start(
+        jail.args(["--observe", &observe])
+            .target([PYTHON, "-c", ORPHANS, &BURST_SIZE.to_string()]),
+        false,
+    );
+    let (run, _) = attempt.finish();
+    let left = subreaper.adopted();
+    drop(subreaper);
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+    assert!(
+        run.stdout_text().contains(&format!("orphans={BURST_SIZE}")),
+        "{}",
+        run.stdout_text()
+    );
+    let receipt = final_receipt(&run);
+    assert_verified(&receipt, "registered_boundary");
+    assert!(
+        left.is_empty(),
+        "observe {observe}: the supervisor exited leaving {} process(es) unreaped: {left:?}",
+        left.len()
+    );
 }
 
 // ===========================================================================
