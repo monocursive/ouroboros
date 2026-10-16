@@ -1,13 +1,12 @@
 # Jail proposal: zero-config agent launch and the end-of-run summary
 
-Status: design proposal, 2026-10-16. Nothing here is implemented, scheduled
-or claimed. It becomes plan of record only when the operator accepts it and
-its open decisions (§7) are settled; until then the
-[north star](../../north-star.md), [Jail v1](jail-v1.md) (revision 24) and
-[Jail v2](jail-v2.md) govern unchanged. Where this proposal would amend them,
-§5 says so row by row. The milestone names
-J12 and J13 and the row numbers K33–K52 are provisional, chosen to follow
-jail-v2's sequence.
+Status: design proposal, 2026-10-16; its decisions were settled by the
+operator the same day (§7). Nothing here is implemented, scheduled or
+claimed. Until it is implemented the [north star](../../north-star.md),
+[Jail v1](jail-v1.md) (revision 24) and [Jail v2](jail-v2.md) govern
+unchanged; where this proposal amends them, §5 says so row by row. The
+milestone names J12, J13 and J14 and the row numbers K33–K54 are
+provisional, chosen to follow jail-v2's sequence.
 
 Two features, one aim: make the jail's cost small and its benefit visible.
 Today a sandboxed agent needs a long command line and a hand-edited
@@ -33,7 +32,7 @@ ukai-jail claude -p "fix the failing test in parser.rs"
 ukai-jail: settled · exited 0 · 3m41s exec→settled · survivors: none (verified)
 ukai-jail: workspace: 4 paths opened for writing, 1 renamed, 1 removed
 ukai-jail: network: allowed api.anthropic.com:443 (41) · denied github.com:443 (1)
-ukai-jail: credential claude-oauth: vault, never staged · loaded · 0 refusals
+ukai-jail: credential claude-oauth: vault, never staged · used on 41 proxy results · 0 refusals
 ukai-jail: evidence: 6/6 classes active, no gaps · reads and file contents are not observed
 ukai-jail: receipt /home/u/.local/share/ukai/attempts/att_…/jail.json
 ```
@@ -53,18 +52,24 @@ In scope:
   `ukai-jail run --launch NAME --from-path [-- ARG...]`, with the workspace
   defaulting to the repository top level, the agent's binary resolved from
   the operator's `PATH` and its install root granted read-only, and a vault
-  credential the agent finds under its own variable name.
+  credential the agent finds under its own variable name. J12 also tightens
+  plain `run`: a workspace that is `/`, the operator's home or an ancestor
+  of it refuses on every run (§3.2, step 3).
 - **J13, the end-of-run summary**: a few lines on stderr after `run`
   settles, computed only from the final receipt and the attempt journal,
-  with `--quiet` to turn it off.
+  with `--quiet` to turn it off, and the same summary off the terminal as
+  `tail --summary [--json]` (§4.5).
 
-Excluded, each for a stated reason:
+Deferred to the next named milestone, **J14, interactive sessions** (outline
+in §3.8):
 
 - **A support claim for interactive sessions.** Every recorded agent run is
   headless, and the backend detaches the child from the terminal (§3.7).
 - **Persistent vendor state.** Vendor state is attempt-private and removed at
   settlement (jail-v1 §12); keeping session history across runs changes that
-  invariant and needs its own proposal (§7, decision 7).
+  invariant.
+
+Excluded, each for a stated reason:
 - **Reading the operator's existing agent configuration.** jail-v1 §12: "the
   runtime does not discover and mount all files in an agent's home
   directory". The alias stages no file from `~/.claude`, `~/.codex` or
@@ -79,7 +84,7 @@ Excluded, each for a stated reason:
 | Invariant | Source | How this proposal keeps it |
 |---|---|---|
 | A project `ukai.toml` can only narrow | jail-v1 §6.3 | No new project-file key. The derived grant and the profile's hosts enter resolution as operator layers, so a project file can still deny-read the install root or shrink `network.allow`; it cannot add a credential, a host or a grant, or select `--from-path`. |
-| Nothing widens silently | jail-v1 §6.2 (a widening layer "must never load silently"); north star §4.3 (no widening during an attempt) | Every derived grant is shown by `explain --from-path` (text and JSON), carried in the policy snapshot with provenance origin `program-resolution`, listed in the receipt's `policy.grants`, and printed before exec when stderr is a terminal (§3.3). |
+| Nothing widens silently | jail-v1 §6.2 (a widening layer "must never load silently"); north star §4.3 (no widening during an attempt) | Every derived grant is shown by `explain --from-path` (text and JSON), carried in the policy snapshot with provenance origin `program-resolution`, listed in the receipt's `policy.grants` with `by: "program_resolution"` so it is never mistaken for one the operator typed, and printed before exec when stderr is a terminal (§3.3). |
 | The binary is outside every writable grant | jail-v2 §3.3 (extended) | The resolved program, its interpreter and their install roots refuse when they lie inside, or contain, any child-writable root (§3.3, step 4). |
 | Launch profiles never supply argv | jail-v1 §12; north star §4.5 | Profile data still never names or rewrites a command: `argv[0]` is the name the operator typed, resolved on the operator's `PATH`, and the data only bounds the grant (`program_root`). The north star's stronger wording, that argv is always the operator's `--` arguments, is **amended** for `--from-path` only (§5). |
 | No agent names in the execution core | jail-v1 §15 I02 | Every new key is generic. The word `claude` appears only in profile data, documentation and fixtures. |
@@ -105,7 +110,9 @@ ukai-jail doctor --launch NAME --from-path [--json]
   verbatim; the alias parses no jail option, so an agent flag can never be
   taken for a jail flag. It is exactly
   `ukai-jail run --launch NAME --from-path -- ARG...`: same policy digest,
-  same argv digest. Use the long form to add jail options.
+  same argv digest. Use the long form to add jail options. The fleet front
+  door `ukai` does not forward `ukai NAME`; the alias belongs to `ukai-jail`
+  alone.
 - **Built-in verbs win.** `run`, `tail`, `learn`, `explain`, `doctor`, `gc`,
   `version`, `help` and the proposed `credential` are never launch names on
   the alias path; a launch profile with one of those names stays reachable
@@ -113,9 +120,10 @@ ukai-jail doctor --launch NAME --from-path [--json]
   unknown word exits 2 naming both readings ("no verb or launch profile
   `claud`").
 - **`--from-path`** is the only switch that turns the defaults below on.
-  Without it, `run --launch NAME -- PROGRAM` behaves exactly as today
-  (invocation directory as workspace, `PROGRAM` resolved with the child's
-  `PATH`), so no existing script changes meaning.
+  Without it, `run --launch NAME -- PROGRAM` behaves as today (invocation
+  directory as workspace, `PROGRAM` resolved with the child's `PATH`), with
+  one exception that applies to every `run`: the home-directory refusal of
+  §3.2, step 3.
 - `--from-path` with `--gate-fd`, `--attempt-id` or `--profile none` exits 2.
 
 ### 3.2 Workspace default
@@ -134,13 +142,23 @@ With `--from-path` and no `--workspace`:
 2. No repository found: refuse before preparing, `invalid_config`, key
    `--workspace`: "not inside a git repository; pass --workspace PATH". An
    explicit choice beats a guessed home directory.
-3. The chosen workspace refuses, `policy_widening`, key `--workspace`, when
-   it is `/`, the operator's home, or an ancestor of it. A home directory
-   that is itself a repository (dotfile managers) is exactly the case this
-   catches. (With the default data directory such a workspace is already
-   refused indirectly today, `unsafe_state_path`, because the runtime state
-   under `~/.local/share/ukai` would lie inside a grant; the new check holds
-   whatever `UKAI_DATA_DIR` says and names the real reason.)
+3. **On every contained `run` (`agent`, `tool`, `build`), not only
+   `--from-path`**, a workspace that is `/`, the operator's home, or an
+   ancestor of it refuses, `policy_widening`, key `--workspace`, whether it
+   came from discovery, from `--workspace` or from the invocation directory.
+   (`none` grants no workspace: it shows the host's view unchanged, so the
+   check has nothing to protect there.) A home directory that is itself a repository
+   (dotfile managers) is exactly the case discovery would otherwise pick.
+   With the default data directory such a workspace is already refused
+   indirectly today (`unsafe_state_path`, because the runtime state under
+   `~/.local/share/ukai` would lie inside a grant); the new check holds
+   whatever `UKAI_DATA_DIR` says and names the real reason. Applying it to
+   plain `run` is a deliberate contract change (§5): the product is a
+   developer preview, jail-v2's no-legacy rule says current behaviour is
+   updated rather than preserved for compatibility, and a writable home
+   directory, with its shell start-up files, SSH keys and agent
+   credentials, is the footgun this jail is sold against. There is no flag
+   to bypass the check; `--profile none` remains the uncontained path.
 4. **The child's working directory** becomes the invocation directory when
    it lies beneath the workspace, and the workspace root otherwise. Today the
    backend always `--chdir`s to the workspace root, so an agent started from
@@ -204,10 +222,14 @@ they exist at launch (`profiles.rs`, audit 2026-10-08 M5).
 6. **Disclosure.** `explain --from-path` prints the resolved program, the
    argv and every derived grant; `--json` adds them to the snapshot. The
    snapshot's provenance gains entries with origin `program-resolution`. The
-   receipt lists the grant as `{kind: "read_only", value: R, by: "operator"}`,
-   which needs no schema change, because the operator's own name and `PATH`
-   determined it (decision 4 offers a distinct `by` value instead). When
-   stderr is a terminal, one line precedes exec:
+   receipt lists the grant as
+   `{kind: "read_only", value: R, by: "program_resolution"}` (and the
+   interpreter's root, after an expansion, the same way), so a reader can
+   tell a derived grant from one the operator typed. The receipt schema's
+   `by` changes from the constant `operator` to the enum `operator`,
+   `program_resolution`: an additive value, re-blessed in place under
+   `ukai.jail.receipt/1` in the same commit as the snapshot change for
+   `roots.cwd` (§5). When stderr is a terminal, one line precedes exec:
 
    ```text
    ukai-jail: claude = /home/u/.local/share/claude/versions/<version> (read-only: /home/u/.local/share/claude/versions)
@@ -305,8 +327,7 @@ rule), and create `<config-dir>/credentials/ID` through an anchored no-follow
 walk, directory 0700, file 0600, `O_EXCL` unless `--force` (which replaces by
 checked rename). The value is never printed, logged or echoed. The config
 directory is already isolated from every child-visible root on every run
-(jail-v1 revision 23). Decision 6 asks whether to ship the verb or document a
-shell recipe instead.
+(jail-v1 revision 23). The verbs ship as specified (§7, decision 6).
 
 The bundled `claude` profile this implies (data, subject to the measurements
 in §6.3):
@@ -315,7 +336,7 @@ in §6.3):
 name = "claude"
 jail = "agent"
 state_var = "CLAUDE_CONFIG_DIR"
-credentials_one_of = ["claude-oauth", "anthropic"]   # order: decision 3
+credentials_one_of = ["claude-oauth", "anthropic"]   # subscription first (§7, decision 3)
 
 [environment]
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
@@ -364,7 +385,8 @@ For `ukai-jail claude …` with the profile above, on Linux under `agent`:
 
 What stays refused, whatever the operator types into a project file or the
 agent does: selecting `none` through a launch profile; a project `ukai.toml`
-that adds a credential, host or grant; an install root inside a writable
+that adds a credential, host or grant; a workspace at `/`, the home
+directory or above it, on any contained run; an install root inside a writable
 grant, at `/` or at or above the home directory; a credential source inside
 a child-visible grant; any automatic read of `~/.claude/.credentials.json`,
 `~/.claude.json` or `~/.claude/settings.json`; inheriting the operator's
@@ -386,20 +408,44 @@ job-control emulation (bubblewrap's `--new-session` in `bwrap.rs`), so the
 agent runs without a controlling terminal: it still reads and writes the
 terminal through inherited descriptors, but terminal resizes (`SIGWINCH`) do
 not reach it, opening `/dev/tty` fails, and a terminal-generated `SIGINT`
-goes to the jail, where §8.3 makes it a request to end the attempt. Every recorded agent run so far
-is headless (`opencode run`, `claude -p`). In addition, with empty vendor
-state each run is a first launch, and the authentication page says a new
-configuration directory goes through login and setup on first use; whether
-the setup token skips all of it is unmeasured.
+goes to the jail, where §8.3 makes it a request to end the attempt. Every
+recorded agent run so far is headless (`opencode run`, `claude -p`). In
+addition, with empty vendor state each run is a first launch, and the
+authentication page says a new configuration directory goes through login
+and setup on first use; whether the setup token skips all of it is
+unmeasured.
 
-So J12's support claim is `ukai-jail claude -p …` and its equivalents. An
-interactive claim needs two decisions (§7, decision 7): a terminal mode that
-omits `--new-session` only when stdin is a terminal, resting on the filter's
-existing `TIOCSTI` denial (a security review must cover `TIOCLINUX` and the
-kernel's `legacy_tiocsti` default too), and persistent per-profile vendor
-state with its own receipt semantics. Until both exist, the alias still
-starts an interactive session when asked, and `doctor --launch` says that
-mode is unrecorded.
+So J12's support claim is `ukai-jail claude -p …` and its equivalents
+(§7, decision 7). The alias still starts an interactive session when asked;
+`doctor --launch` says that mode is unrecorded, and nothing claims it works
+until J14 (§3.8) records it.
+
+### 3.8 Next milestone: J14, interactive sessions (outline)
+
+Named here so the headless boundary of J12 has a destination; it is not
+designed in this document and gets its own proposal before any code.
+
+- **Terminal mode.** When stdin is a terminal, run the agent in the
+  caller's session instead of a new one, so resizes, `/dev/tty` and
+  terminal signals reach it. This amends jail-v1 §8.3 ("The command runs in
+  a new session"), so it ships only after a security review that covers
+  `TIOCSTI` injection (the filter's existing denial), `TIOCLINUX` on virtual
+  consoles, and hosts where the kernel's `legacy_tiocsti` setting still
+  allows injection; the review also decides how `SIGINT` from the terminal
+  is split between the agent and the jail's own stop request. Off a
+  terminal, nothing changes.
+- **Persistent per-profile vendor state.** An operator-owned state
+  directory per launch profile that survives attempts, so login state,
+  settings the agent writes and session history (`--resume`) persist. This
+  amends jail-v1 §12 (vendor state removed at settlement) and needs receipt
+  semantics of its own: which state an attempt started from (identity and
+  digest, never content), what it changed, that a later attempt inherits
+  what an earlier, possibly compromised one wrote, and how `gc` and
+  `state_cleanup` treat a directory that is meant to outlive the tree.
+- **Exit criteria.** Both mechanisms pass their acceptance rows on the
+  reference host, and a Claude Code compatibility row records an
+  interactive session (resize, interrupt, resume) separately from the J12
+  headless row.
 
 ## 4. End-of-run summary (J13)
 
@@ -417,12 +463,12 @@ mode is unrecorded.
 - At most eight lines; at most five hosts per list, then `+N more`. Every
   child-chosen string (paths, hosts) goes through the existing control-byte
   escaping (audit 2026-10-08 M1).
-- **A pure function of evidence.** `summary(receipt, journal) -> lines` takes
-  the final `jail.json` and the attempt's `trace.ndjson`, reads nothing else
-  (no supervisor memory, no counters kept on the side), and reuses
-  `journal.rs`, which never counts a partial final frame. Anyone can therefore
-  recompute it. The same function serves attempts after the fact and non-TTY
-  callers as `ukai-jail tail --summary [--attempt ID]` (decision 8).
+- **A pure function of evidence.** `summary(receipt, journal) -> Summary`
+  takes the final `jail.json` and the attempt's `trace.ndjson`, reads
+  nothing else (no supervisor memory, no counters kept on the side), and
+  reuses `journal.rs`, which never counts a partial final frame. Anyone can
+  therefore recompute it. The terminal lines and the JSON form of §4.5 are
+  two renderings of that one value, never two computations.
 - **Initial cost budget**: at most 50 ms added on the reference host for an
   A01-sized journal (the milestone A01 receipt counted 13,091 `fs.write`
   events). A journal over 16 MiB (initial) is not scanned; the lines that need
@@ -440,7 +486,7 @@ name [`ukai.event/1`](jail-v1/jail-event.schema.json) frames in the attempt's
 | Status | Phase, outcome, duration, survivors | `/phase`; `/outcome/kind`, `/code`, `/signal`, `/cause`; `/errors/*/code`; `/lifetime/tree_empty`, `/verification_scope`, `/integrity`. Duration: `monotonic_ns` of the note `{operation: "note", fields.kind: "lifecycle", fields.transition: "exec_confirmed"}` to that of the `{operation: "jail.receipt", fields.phase: "settled"}` note (one supervisor clock). | Not `settled`: `NOT settled (<phase>)` with the error codes and, for `tree_unknown`, "run `ukai-jail gc`". No `exec_confirmed` note: no duration. No journal: `/created_at` to `/updated_at`, labelled `attempt` (wall clock, can step). `tree_empty` true prints `survivors: none (verified)`, with `registered cgroup only` when the scope is `registered_boundary` (`none`); false or null prints `survivors: NOT verified`. `/integrity` `lost` prints `integrity lost: state retained`. |
 | Workspace | Distinct workspace paths opened for writing, renamed or removed; unnamed ones; refused writes | Journal: `source: "audit"`, `stage: "result"`, `outcome.ok: true`, `operation` in `fs.create`, `fs.write` (`fields.action` `opened_for_mutation` or `truncated`), `fs.rename` (`fields.path` and `fields.path2`), `fs.unlink`; distinct `fields.path.value` where `fields.path.kind` is `workspace_relative`. Unnamed: the same events with path kind `unavailable` or `digest`. Refused: `operation: "fs.deny"` with a file `fields.attempted_operation`. Gate: `/coverage/fs.write/status` (that class covers all four operations, jail-v1 §11.4), `/coverage/fs.deny/status`. | `active`: exact numbers. `degraded`, or an incomplete journal: every number prefixed `at least`. `unsupported` (observation off): `workspace: not observed (--observe off)`, never `0`. `fs.create` and `fs.write` are both printed as "opened for writing", never "created", "changed" or "written": jail-v1 §11.2 says such an event proves neither bytes written nor a newly created file. `fs.rename` prints "renamed", `fs.unlink` "removed". Refused writes outside known roots are recorded as a path digest (`outside_known_roots`), so they are counted, never named. |
 | Network | Destinations allowed and denied, with counts | Journal: `source: "proxy"`, `operation: "net.connect"`, `stage: "result"`, grouped by `fields.destination`; allowed is `decision: "allow"` (with `outcome.ok: false` counted as `connect failed`), denied is `decision: "deny"` with its `fields.reason`. `/coverage/proxy.net/resolver_refused` when present (capacity, not policy). Gate: `/applied/network/mode`, `/coverage/proxy.net/status`. | The unit is a proxy result (a tunnel, or one request on the vault's TLS lane), never "requests". Mode `none`: `network: none`. Mode `host` (`none` profile): `network: host, not observed`. `proxy.net` degraded: `at least`. |
-| Credentials | Per credential: mode, staging, lifecycle, refusals | `/credentials/*/id`, `/mode`, `/never_staged`; journal notes `fields.kind: "credential"` with `credential_id` and `transition` (`loaded`, `refreshed`, `revoked`, `refresh_failed`); proxy results whose `fields.reason` begins `credential_`. | Uses are **not** printed: no event records that a placeholder was substituted (§4.3). `copy_rw` and `bind_ro` print `staged (readable by the agent)`, so the vault's difference is visible. |
+| Credentials | Per credential: mode, staging, uses, lifecycle, refusals | `/credentials/*/id`, `/mode`, `/never_staged`; uses: the number of proxy results whose new `fields.credentials` array contains the id (§4.3); journal notes `fields.kind: "credential"` with `credential_id` and `transition` (`loaded`, `refreshed`, `revoked`, `refresh_failed`); refusals: proxy results whose `fields.reason` begins `credential_`. | The unit is "proxy results that substituted it" (`used on N proxy results`), never "requests" or "calls". A use means the real value was placed into a request the proxy sent upstream, not that the upstream accepted it: response status is not recorded. `proxy.net` degraded or the journal incomplete: `at least`. A journal from a build that predates the field (decided by `/jail/version`) prints `uses not recorded`, never `0`. `copy_rw` and `bind_ro` credentials have no uses to count (the agent holds the value itself) and print `staged (readable by the agent)`, so the vault's difference is visible. |
 | Evidence | Observation mode, class status, gaps, journal completeness | `/policy/observe`, `/policy/evidence`, `/observer/attached`, `/coverage/<class>/status`, `/coverage/<class>/gaps/*/reason` and `lost_count`; completeness: the journal's last frame is the `jail.receipt` note whose `receipt_digest` matches the final receipt (jail-v1 §13.3). | All six active and complete: `6/6 classes active, no gaps`. Otherwise each non-active class with its first gap reason and lost count (or `unknown`). Always appended when any audit class is shown: `reads and file contents are not observed`. Incomplete journal: `journal incomplete: counts above are lower bounds`. |
 | Limits (only when relevant) | A hit ceiling or an unapplied one | `/applied/limits/*` with `hit: true`, or `applied: false`. | Absent when nothing was hit and everything applied. |
 | Cleanup and protection (only when relevant) | Pending vendor-state removal; an uncontained run | `/state_cleanup` `pending`; `/child_protection` `unprotected`. | `vendor state cleanup pending: run ukai-jail gc`; `uncontained (none): nothing above was enforced`. |
@@ -461,7 +507,7 @@ no number for that class.
 | Which workspace paths were opened for writing, renamed or removed? | Yes, with `observe on` and the class `active`; a lower bound when degraded. | Dirfd-relative calls can leave the path `unavailable`: counted as unnamed. Whether a file was newly created or its content changed is not established. |
 | What did it try to write outside its grants? | Count only. | Denied paths outside known roots are digests. |
 | Which hosts did it reach or try? | Yes, under `agent` with `proxy.net` active. | The network namespace leaves the proxy as the only route, so the list is complete for an active class. Names are what the client asked the proxy for; DNS (`net.dns`) is not recorded. |
-| How often did it use each credential? | **No, today.** | Proxy results carry no credential id. Proposed: an optional `fields.credentials` array on proxy results listing the ids substituted on that connection (ids only; an event-schema change, decision 5). Until then the line shows lifecycle and refusals only. |
+| How often did it use each credential? | **Not today; yes after J13**, counted as proxy results. | Proxy results carry no credential id today. J13 adds an optional `fields.credentials` to proxy-source `net.connect` results: the ids (never values, placeholders or digests) whose placeholder the proxy replaced in at least one request it sent upstream on that connection, sorted and unique; absent when it replaced none, so a run without a vault journals the same frames as before. A refused request is not a use; it stays a `credential_*` reason. On the vault's TLS lane each connection carries one request (or one WebSocket upgrade), so the count is close to a request count there, but the summary still names its unit. |
 | Did any process survive? | Yes: `/lifetime/tree_empty` for `attempt_tree`. | Under `none` only the identity-checked cgroup is verified (`registered_boundary`), and the line says so. |
 | Anything with `--observe off`? | Proxy and limits only. | The audit classes are `unsupported`; the summary says `not observed`, never zero. |
 | Anything with `--trace-fd`? | Receipt-only lines. | The journal is streamed to the descriptor, not kept locally (jail-v1 §13.3); the summary says `journal streamed to fd N`. |
@@ -482,19 +528,87 @@ ukai-jail: workspace: at least 3 paths opened for writing
 ukai-jail: evidence: fs.write degraded (trace_transport_loss, lost unknown) · journal incomplete: counts above are lower bounds
 ```
 
+### 4.5 Off the terminal: `tail --summary [--json]`
+
+```text
+ukai-jail tail --summary [--attempt ID] [--json]
+```
+
+Prints the summary of a recorded attempt (the most recent one by default,
+as `tail` already selects) on stdout, for CI logs and for a future GitHub
+Action that appends it to the job summary; the Action itself is not part of
+this proposal. It reads only the attempt's `jail.json` and `trace.ndjson`
+through the same pure function as the live run, so for a settled attempt it
+prints exactly the lines the run printed (K52). It works on live attempts
+too and then reports what is recorded so far, with the phase saying so.
+`--summary` refuses with `--follow` and `--since` (exit 2); it exits 0 when
+it printed a summary and 1 when the attempt cannot be read. It never
+returns the agent's exit code.
+
+`--json` prints one `ukai.jail.summary/1` object (a new versioned record;
+its schema file `jail-v1/jail-summary.schema.json` and a `[[frozen]]` entry
+in `frozen-schemas.toml` ship with it):
+
+```json
+{
+  "schema": "ukai.jail.summary/1",
+  "attempt_id": "att_…",
+  "receipt_digest": "sha256:…",
+  "journal": "complete",
+  "lines": [
+    {"line": "status", "text": "settled · exited 0 · 3m41s exec→settled · survivors: none (verified)",
+     "facts": {"phase": "settled", "outcome": "exited", "code": 0, "exec_to_settled_ms": 221000,
+               "survivors": "none_verified"}},
+    {"line": "workspace", "text": "workspace: 4 paths opened for writing, 1 renamed, 1 removed",
+     "facts": {"bound": "exact", "opened_for_writing": 4, "renamed": 1, "removed": 1, "unnamed": 0,
+               "refused": 0, "paths": [{"kind": "workspace_relative", "value": "src/parser.rs"}],
+               "omitted": 0}},
+    {"line": "network", "text": "network: allowed api.anthropic.com:443 (41) · denied github.com:443 (1)",
+     "facts": {"bound": "exact",
+               "allowed": [{"destination": "api.anthropic.com:443", "results": 41, "connect_failed": 0}],
+               "denied": [{"destination": "github.com:443", "reason": "host_not_allowed", "results": 1}],
+               "omitted": 0}},
+    {"line": "credentials", "text": "credential claude-oauth: vault, never staged · used on 41 proxy results · 0 refusals",
+     "facts": {"credentials": [{"id": "claude-oauth", "mode": "vault", "never_staged": true,
+                                "uses": 41, "uses_bound": "exact", "transitions": ["loaded"],
+                                "refusals": 0}]}},
+    {"line": "evidence", "text": "evidence: 6/6 classes active, no gaps · reads and file contents are not observed",
+     "facts": {"observe": "on", "evidence": "strict", "classes": {"exec": "active", "fs.write": "active",
+               "fs.deny": "active", "net": "active", "proxy.net": "active", "limits": "active"}, "gaps": []}}
+  ]
+}
+```
+
+- `receipt_digest` is the SHA-256 over the final receipt's canonical bytes
+  (the value the journal's last `jail.receipt` note carries), so a CI
+  artifact names exactly the receipt it summarizes.
+- `journal` is `complete`, `incomplete`, `streamed` (`--trace-fd`),
+  `not_scanned` (over the scan cap) or `absent`.
+- Each entry's `text` is the terminal line without its `ukai-jail: `
+  prefix, with the same escaping; `facts` carries the numbers behind it.
+  Every count has a bound, `exact`, `at_least` or `not_observed`, and a
+  `not_observed` count is `null`, never `0`. Lines absent from the terminal
+  form (limits, cleanup) are absent here too, and the terminal's receipt
+  path line is replaced by `attempt_id` and `receipt_digest`.
+- Lists are capped at 64 entries each with an `omitted` count; the terminal
+  shows five. Paths keep the event schema's `{kind, value}` path form;
+  destinations are the proxy result's normalized `destination` string.
+
 ## 5. Contract changes this implies
 
 | Change | Kind | Notes |
 |---|---|---|
-| `ukai-jail NAME`, `run/explain/doctor --from-path`, `run --quiet`, `credential set/rm`, `tail --summary` | CLI | `--from-path` refuses with the gate flags and `none`. |
+| `ukai-jail NAME`, `run/explain/doctor --from-path`, `run --quiet`, `credential set/rm`, `tail --summary [--json]` | CLI | `--from-path` refuses with the gate flags and `none`. `ukai NAME` is not forwarded. |
+| **Plain `run`**: a workspace that is `/`, the operator's home or an ancestor of it refuses on every contained run, `policy_widening`, key `--workspace` | Behaviour change for existing `run` invocations (jail-v1 §6.2 defaults the workspace to the invocation directory and has no such refusal) | Deliberate (§3.2, step 3; §7, decision 2). [operating.md](jail-v1/operating.md#commands) and the guide change with it; a script that ran from `~` now refuses with a message naming `--workspace`. |
 | Under `--from-path`, argv is the operator's words with the first resolved to an absolute path (and, for `#!/usr/bin/env X`, the interpreter made explicit) | Amends north star §4.5 ("`argv` is always the operator's `--` arguments") | Profile data still never names or rewrites a command; the expansion is the CLI's, shown by `explain`. |
 | A missing credential source is skipped when its id is in `credentials_one_of` and another listed source exists | Amends north star §4.5 ("A missing source refuses the launch") and jail-v1 §12 | Every other missing or unsafe source still refuses. |
 | `claude`'s declared inputs become a vault setup token or API key, not `.credentials.json` and `settings.json` | Amends the north star §4.5 and jail-v1 §12 profile tables | §3.5 gives the reason. |
 | `program_root`, `env`, `binaries = ["@program"]`, `hint`, `credentials_one_of`, `@config/` | Launch-profile grammar (jail-v1 §12) | Data-only; the I02 source test keeps agent names out of code. |
-| `roots.cwd`; provenance origin `program-resolution` | Policy snapshot schema | Changes policy digests; fixtures re-blessed together, per jail-v2's no-legacy rule. |
+| `roots.cwd`; provenance origin `program-resolution` | Policy snapshot schema (`ukai.jail.policy-snapshot/1`) | Additive; changes policy digests. Re-blessed in place with its fixtures and a dated rationale in [frozen-schemas.toml](jail-v1/frozen-schemas.toml), as earlier additive changes were. |
+| `policy.grants[].by` gains the value `program_resolution` (was the constant `operator`) | Receipt schema (`ukai.jail.receipt/1`) | Required (§7, decision 4). Additive value; re-blessed in place in the same commit as the snapshot change. |
+| Optional `fields.credentials` (credential ids only) on proxy-source `net.connect` results | Event schema (`ukai.event/1` via `jail-event.schema.json`) | Required (§7, decision 5). Additive and absent when nothing was substituted; `jail-event.schema.json` re-blessed in place with its examples (a new `event-proxy-vault.json`) and a dated rationale in `frozen-schemas.toml`. |
+| `ukai.jail.summary/1` | New record (`jail-v1/jail-summary.schema.json`) | A new `[[frozen]]` entry; `validate_contract.py` validates its fixtures (§4.5). |
 | `jail.summary` | `config.toml` | Presentation only; not a policy input. |
-| Optional `fields.credentials` on proxy results | Event schema | Only if decision 5 says yes. |
-| Optional `by: "program_resolution"` | Receipt schema | Only if decision 4 says yes. |
 
 ## 6. Tests and the compatibility run required before "supported"
 
@@ -503,12 +617,12 @@ ukai-jail: evidence: fs.write degraded (trace_transport_loss, lost unknown) · j
 | Row | Claim |
 |---|---|
 | K33 | The alias equals `run --launch NAME --from-path -- ARG...` (identical policy and argv digests); built-in verbs win; an unknown word exits 2; `--from-path` with `--gate-fd`, `--attempt-id` or `--profile none` exits 2. |
-| K34 | Workspace discovery: a `.git` directory, a `.git` file (worktree, submodule), none (refusal naming `--workspace`), a mount boundary, a symlinked invocation directory; home, its ancestors and `/` refuse; a recording `git` placed first on `PATH` is never executed. |
+| K34 | Workspace discovery: a `.git` directory, a `.git` file (worktree, submodule), none (refusal naming `--workspace`), a mount boundary, a symlinked invocation directory; home, its ancestors and `/` refuse, from discovery, from `--workspace` and from the invocation directory of a plain `run` under `agent`, `tool` and `build` (and still run under `none`); a recording `git` placed first on `PATH` is never executed. |
 | K35 | The child starts in the invocation directory beneath the workspace; `roots.cwd` is in the snapshot and changes the digest. |
 | K36 | Resolution: first absolute `PATH` entry; empty and relative entries skipped; symlink chains canonicalized; the install root is read-only inside (a write fails and is journaled as `fs.deny`); every §3.3 refusal fires with its key and names the root. |
 | K37 | Replacing the executable or its root between resolution and release refuses (identity mismatch); no other file runs. |
 | K38 | Interpreters: ELF, `#!` inside the runtime roots, `#!/usr/bin/env node` with node outside them (argv expanded, interpreter granted), and each unsupported form refusing with the interpreter named. |
-| K39 | Disclosure: each derived grant appears in `explain --from-path` text and JSON, in provenance, in the receipt's `policy.grants`, and in the pre-exec line on a terminal; with stderr not a terminal nothing is added (X05 suite rerun). |
+| K39 | Disclosure: each derived grant appears in `explain --from-path` text and JSON, in provenance, in the receipt's `policy.grants` with `by: "program_resolution"` (and an operator's own `--ro` of the same path stays `by: "operator"`), and in the pre-exec line on a terminal; the re-blessed receipt and snapshot schemas validate every example and fixture; with stderr not a terminal nothing is added (X05 suite rerun). |
 | K40 | Project `ukai.toml` under the alias: may deny-read the install root and shrink hosts (the agent then fails visibly); every widening key still refuses with its existing code. |
 | K41 | Vault `env`: an in-jail fixture prints its environment and finds only the placeholder under the declared name (as K14 does for `UKAI_VAULT_*`); reserved and colliding names refuse at load. |
 | K42 | `credentials_one_of`: the first present source is staged and the rest skipped; only `ENOENT` counts as absent (bad mode, extra link, symlink still refuse); none present refuses before exec with every hint; the receipt lists only the staged id. |
@@ -527,6 +641,8 @@ ukai-jail: evidence: fs.write degraded (trace_transport_loss, lost unknown) · j
 | K50 | `--quiet` and `jail.summary = false` suppress summary and receipt line, errors still print, and the exit code is unchanged in every K45 case. |
 | K51 | Cost on the reference host: an A01-sized journal within the 50 ms budget; a journal past the scan cap prints the receipt-only lines and says so. |
 | K52 | `tail --summary` on a settled attempt prints exactly what the live run printed, and an independent script recomputes every number from the archived receipt and journal. |
+| K53 | `fields.credentials`: present on exactly the proxy results whose upstream request carried a substituted value, listing ids sorted and unique; absent on results with no substitution, on refused requests (`credential_*` reasons) and in every run without a vault credential (journal frames unchanged); never a value, placeholder or digest (searched as the benchmarks' exposure checks do); the re-blessed `jail-event.schema.json` validates the new example; the summary's use count equals the number of results carrying the id, with `at least` when `proxy.net` is degraded and `uses not recorded` for a journal from a build without the field. |
+| K54 | `tail --summary --json` validates against `ukai.jail.summary/1`; its `text` fields equal the terminal lines of the same attempt byte for byte (one value, two renderings); `receipt_digest` matches the final receipt; every count from a degraded class carries `at_least`, every unobserved one is `null` with `not_observed`; lists cap at 64 with `omitted`; `--summary` with `--follow` or `--since` exits 2. |
 
 ### 6.3 The Claude Code compatibility record (A-row)
 
@@ -551,8 +667,10 @@ row. The benchmark runs prove a transport, not a profile. The row that makes
 - **Pass conditions for (1) to (3).** The file contains `hello`; the receipt
   is settled, exit 0, no error, all six classes active without gaps,
   `tree_empty` true, `state_cleanup` complete; `credentials` lists exactly
-  one id with `never_staged: true`; `policy.grants` lists the derived install
-  root and nothing unexpected; the summary's numbers reproduce from the
+  one id with `never_staged: true`, and the summary shows that id's use
+  count; `policy.grants` lists the derived install root with
+  `by: "program_resolution"` and nothing unexpected; the summary's numbers,
+  text and `--json` alike, reproduce from the
   archived receipt and journal (K52); the token's value is absent from the
   receipt, journal, workspace, the agent's output and its sampled
   environments (the benchmarks' exposure sampler).
@@ -573,27 +691,45 @@ Because the alias changes OpenCode's grant (derived instead of `--ro
 repeated under `ukai-jail opencode run "…"` before its existing row is
 extended to the alias.
 
-## 7. Open decisions
+## 7. Decisions (settled 2026-10-16)
 
-1. **Alias surface.** Ship `ukai-jail NAME` (recommended: it is the
-   install-and-go form), or only `run --launch NAME --from-path`; and the
-   flag's name.
-2. **Workspace outside a repository.** Refuse and ask for `--workspace`
-   (recommended), or fall back to the invocation directory. Separately:
-   apply the new home/ancestor refusal to every `run`, or only to
-   `--from-path` (recommended for now, so existing scripts keep working).
-3. **Credential order** when both a setup token and an API key exist:
-   subscription first (proposed above), or the vendor's own precedence (key
-   first).
-4. **Receipt attribution** of derived grants: keep `by: "operator"` (no
-   schema change, proposed), or add `by: "program_resolution"`.
-5. **Credential uses** in the summary: add `fields.credentials` to proxy
-   results (an event-schema change), or keep the line to lifecycle and
-   refusals.
-6. **`ukai-jail credential set/rm`** as verbs, or a documented `umask 077 &&
-   printf` recipe.
-7. **Interactive support**: a terminal mode without the new session, and
-   persistent per-profile vendor state. Both change v1 invariants (§8.3 and
-   §12); neither is proposed here beyond naming the work.
-8. **Off-terminal summaries**: `tail --summary` (proposed), a new verb, or
-   none.
+The operator settled the eight questions the first draft left open. Two of
+them (2 and 4) override that draft's recommendation; the body above already
+follows every choice.
+
+1. **Alias surface.** `ukai-jail NAME` ships as the short form of
+   `run --launch NAME --from-path -- ARG...`, and `--from-path` stays the
+   long-form flag. The fleet front door does not forward `ukai NAME` (§3.1).
+2. **Workspace.** Outside a git repository `--from-path` refuses and asks
+   for `--workspace`. The refusal of `/`, the home directory and its
+   ancestors applies to every contained `run`, not only `--from-path`. **The
+   operator overrode the draft**, which had recommended limiting it to
+   `--from-path` so existing scripts kept working: this is a developer
+   preview, jail-v2's no-legacy rule updates current behaviour rather than
+   preserving it, and a home-directory workspace is the footgun the product
+   is sold against (§3.2, step 3; listed in §5 as a contract change for
+   plain `run`). Applying it to contained profiles only, since `none`
+   grants no workspace, is this document's reading of "every `run`".
+3. **Credential order.** Subscription first:
+   `credentials_one_of = ["claude-oauth", "anthropic"]`, as proposed (§3.5).
+4. **Receipt attribution.** Derived grants are recorded as
+   `by: "program_resolution"`. **The operator overrode the draft**, which had
+   proposed keeping `by: "operator"` to avoid a receipt schema change; the
+   change rides on the snapshot re-bless that `roots.cwd` already needs
+   (§3.3, step 6; §5).
+5. **Credential uses.** Proxy results gain the optional `fields.credentials`
+   (ids only, never values), and the summary prints per-credential use
+   counts in proxy results that substituted the credential (§4.2, §4.3, §5,
+   K53).
+6. **Credential verbs.** `ukai-jail credential set ID` and
+   `credential rm ID` ship as specified in §3.5.
+7. **Interactive sessions.** J12 stays headless (`-p`). Interactive support
+   is the next named milestone, J14 (provisional): a terminal mode without
+   the new session when stdin is a terminal, after a security review of
+   `TIOCSTI`, `TIOCLINUX` and `legacy_tiocsti`, plus persistent per-profile
+   vendor state with its receipt semantics. Outlined in §3.8, not designed
+   here.
+8. **Off-terminal summaries.** `ukai-jail tail --summary [--attempt ID]`
+   with a `--json` form, `ukai.jail.summary/1`, rendered from the same pure
+   summary function, for CI logs and a future GitHub Action job summary
+   (§4.5, K54).
