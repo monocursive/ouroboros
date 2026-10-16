@@ -99,20 +99,32 @@ pub fn kernel_exe(tid: pid_t, images: &[Vec<u8>]) -> Option<super::KernelImage> 
 /// The `#!` evidence for one target-image candidate, read through the tracee's
 /// root while the tracee is stopped at its exec event: the interpreter the
 /// script's first line names, its optional single argument, and the
-/// interpreter's `(dev, ino)` in the tracee's root. `None` for a non-absolute
-/// spelling (the resolved form of the same file carries the evidence), a file
-/// that cannot be read through the root, or a first line that is not a shebang.
-/// The kernel's own buffer for this line is 256 bytes: the interpreter name
-/// must fit, while its optional argument may be truncated by the kernel.
+/// interpreter's `(dev, ino)` in the tracee's root. An absolute spelling is
+/// read through the root; any other spelling is read through the tracee's
+/// `cwd`, which is the base the kernel itself resolved that spelling against
+/// and which an exec does not change. `None` for a spelling that cannot be
+/// read through either, or a first line that is not a shebang. The kernel's
+/// own buffer for this line is 256 bytes: the interpreter name must fit,
+/// while its optional argument may be truncated by the kernel.
 #[must_use]
 pub fn shebang_image(tid: pid_t, script: &[u8]) -> Option<super::ShebangImage> {
     use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::MetadataExt as _;
-    if script.first() != Some(&b'/') {
-        return None;
+    let link = if script.first() == Some(&b'/') {
+        "root"
+    } else {
+        "cwd"
+    };
+    let mut path = format!("/proc/{tid}/{link}").into_bytes();
+    if script.first() == Some(&b'/') {
+        path.extend_from_slice(script);
+    } else {
+        // A relative spelling joins the cwd with a separator; an empty
+        // spelling names the cwd itself, which `image_header` rejects as a
+        // non-file.
+        path.push(b'/');
+        path.extend_from_slice(script);
     }
-    let mut path = format!("/proc/{tid}/root").into_bytes();
-    path.extend_from_slice(script);
     let head = image_header(std::ffi::OsStr::from_bytes(&path))?;
     let (interpreter, argument) = parse_shebang(&head)?;
     let identity = (interpreter.first() == Some(&b'/'))
@@ -567,6 +579,30 @@ mod tests {
         let mut long_argument = b"#!/bin/sh ".to_vec();
         long_argument.resize(256, b'x');
         assert_eq!(parse_shebang(&long_argument).unwrap().1.unwrap().len(), 245);
+    }
+
+    #[test]
+    fn shebang_image_reads_a_relative_spelling_through_cwd() {
+        // Audit 2026-10-15 H2′: the kernel resolves a relative execve
+        // spelling against the caller's cwd, which an exec does not change,
+        // so the observer reads the same file through the tracee's cwd link.
+        let here = tempfile::tempdir_in(".").unwrap();
+        let relative = here
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let script = format!("./{relative}/script");
+        fs::write(here.path().join("script"), b"#!/bin/sh -e\nbody\n").unwrap();
+        let me = std::process::id() as pid_t;
+        let image = shebang_image(me, script.as_bytes()).expect("relative spelling read via cwd");
+        assert_eq!(image.interpreter, b"/bin/sh");
+        assert_eq!(image.argument.as_deref(), Some(b"-e".as_slice()));
+        assert!(image.identity.is_some(), "the interpreter stat resolves");
+        // A spelling the cwd cannot satisfy stays `None`, never a guess.
+        let missing = format!("./{relative}/absent");
+        assert!(shebang_image(me, missing.as_bytes()).is_none());
     }
 
     use super::*;

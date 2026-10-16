@@ -889,6 +889,52 @@ mod tests {
         assert!(!audit.has_gaps());
     }
 
+    /// Audit 2026-10-15 H2′: a relative execve spelling (`./s.sh`) puts the
+    /// relative form in the kernel's argv script slot, so the candidate that
+    /// byte-matches the snapshot is the raw spelling — whose `#!` evidence is
+    /// now read through the tracee's cwd. Both candidates carrying evidence,
+    /// the relative spelling confirms exactly as the absolute one does.
+    #[test]
+    fn a_relative_shebang_spelling_confirms_through_the_cwd_candidate() {
+        let images = vec![b"/w/s.sh".to_vec(), b"./s.sh".to_vec()];
+        let target = Target {
+            launcher: LAUNCHER,
+            images: &images,
+        };
+        let shebang = ShebangImage {
+            interpreter: b"/bin/sh".to_vec(),
+            argument: None,
+            identity: Some((7, 8)),
+        };
+        // Both spellings of the same script carry evidence: the absolute one
+        // through the root, the relative one through the cwd.
+        let shebangs = vec![Some(shebang.clone()), Some(shebang)];
+        let kernel = Some(KernelImage {
+            path: b"/usr/bin/dash".to_vec(),
+            identity: Some((7, 8)),
+            candidates: Vec::new(),
+        });
+        let argv = |args: &[&[u8]]| -> Option<Vec<Vec<u8>>> {
+            Some(args.iter().map(|arg| arg.to_vec()).collect())
+        };
+        let mut audit = AuditWriter::new("att_h2rel", None, b"/work", b"");
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_evidence(
+                    LAUNCHER,
+                    snapshot(b"./s.sh", true),
+                    kernel,
+                    shebangs,
+                    argv(&[b"/bin/sh", b"./s.sh"]),
+                ),
+            ),
+            Fact::TargetExec
+        );
+        assert!(!audit.has_gaps(), "a confirmed script exec leaves no gap");
+    }
+
     /// The interpreter image alone confirms nothing. Without the candidate in
     /// the kernel's argv script slot — a direct exec of the interpreter,
     /// whatever its argv says — a snapshot naming the script stays a
