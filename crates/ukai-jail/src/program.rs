@@ -10,12 +10,15 @@
 //!
 //! - every directory on the walk is owned by root or this operator and not
 //!   writable by others without the sticky bit (the credential-source rule);
-//! - from the install root down, no directory and not the executable is
-//!   group- or other-writable at all, and the executable is a regular file
-//!   with an execute bit, owned by root or this operator (stricter than
-//!   §3.3 step 2, which names only the write bits: a file another local user
-//!   owns can be rewritten in place under the identity a vault credential is
-//!   bound to);
+//! - from the install root down, no directory is writable by anyone but
+//!   its owner, sticky or not (group write counts only through the owner's
+//!   private group, the rule every other directory check of the jail uses:
+//!   with Ubuntu's default umask 002 a user's own install directories are
+//!   0775), and the executable is a regular file with an execute bit,
+//!   neither group- nor other-writable at all (the vault's own executable
+//!   pin), owned by root or this operator (stricter than §3.3 step 2, which
+//!   names only the write bits: a file another local user owns can be
+//!   rewritten in place under the identity a vault credential is bound to);
 //! - the install root is the directory `program_root` levels above the
 //!   executable, held open (`O_PATH` on Linux) so the platform binds exactly
 //!   that object (`--ro-bind-fd`) and [`Program::recheck`] can walk to the
@@ -249,7 +252,10 @@ impl Executable {
             let stat = current
                 .stat_at(component)
                 .map_err(|error| changed(error.to_string()))?;
-            if stat.kind != Kind::Directory || stat.mode & 0o022 != 0 || !trusted_owner(stat.uid) {
+            if stat.kind != Kind::Directory
+                || crate::state::writable_by_others(stat.mode, stat.uid, stat.gid)
+                || !trusted_owner(stat.uid)
+            {
                 return Err(changed(format!(
                     "a directory below its install root is {} mode {:04o}",
                     stat.kind.describe(),
@@ -475,10 +481,11 @@ fn check_directory(stat: &Stat, path: &Path, in_root: bool) -> Result<(), JailEr
             stat.mode
         )));
     }
-    if in_root && stat.mode & 0o022 != 0 {
+    if in_root && crate::state::writable_by_others(stat.mode, stat.uid, stat.gid) {
         return Err(widening(format!(
-            "{} has mode {:04o}: a directory in the program's install root may not be group- \
-             or other-writable",
+            "{} has mode {:04o}: a directory in the program's install root may not be \
+             writable by anyone but its owner (a group write is allowed only for the owner's \
+             private group)",
             path.display(),
             stat.mode
         )));
@@ -850,8 +857,20 @@ mod tests {
         (dir, root)
     }
 
+    /// `bytes` as an executable at `path`, every directory made for it 0755
+    /// whatever the process umask (a host with umask 002 makes 0775).
     fn executable(path: &Path, bytes: &[u8]) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let parent = path.parent().unwrap();
+        let mut missing = Vec::new();
+        let mut probe = parent.to_path_buf();
+        while !probe.exists() {
+            missing.push(probe.clone());
+            probe.pop();
+        }
+        std::fs::create_dir_all(parent).unwrap();
+        for directory in missing {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         std::fs::write(path, bytes).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
@@ -901,6 +920,7 @@ mod tests {
         executable(&versions.join("2.0"), b"#!/bin/sh\n");
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::os::unix::fs::symlink(root.join("share/link"), bin.join("agent")).unwrap();
         std::os::unix::fs::symlink(versions.join("2.0"), root.join("share/link")).unwrap();
         let program = resolve("agent", Some(bin.as_os_str().as_bytes()), 1).unwrap();
@@ -924,9 +944,25 @@ mod tests {
         assert_eq!(error.code, ErrorCode::PolicyWidening, "{}", error.message);
         std::fs::set_permissions(bin.join("agent"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
+        // Writable by others, sticky or not, inside the install root.
+        for mode in [0o757, 0o1777] {
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(mode)).unwrap();
+            let error = pin(&bin.join("agent"), 1).unwrap_err();
+            assert_eq!(
+                error.code,
+                ErrorCode::PolicyWidening,
+                "{mode:o}: {}",
+                error.message
+            );
+        }
+        // Group-writable: refused unless the group is the owner's private
+        // one (Ubuntu's umask 002 gives a user's own directories 0775).
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o775)).unwrap();
-        let error = pin(&bin.join("agent"), 1).unwrap_err();
-        assert_eq!(error.code, ErrorCode::PolicyWidening, "{}", error.message);
+        let private = crate::state::accounts::group_is_private_to(
+            crate::state::effective_uid(),
+            std::os::unix::fs::MetadataExt::gid(&std::fs::metadata(&bin).unwrap()),
+        );
+        assert_eq!(pin(&bin.join("agent"), 1).is_ok(), private);
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let program = resolve("agent", Some(bin.as_os_str().as_bytes()), 1).unwrap();

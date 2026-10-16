@@ -1,8 +1,11 @@
 # Jail proposal: zero-config agent launch and the end-of-run summary
 
 Status: design proposal, 2026-10-16; its decisions were settled by the
-operator the same day (§7). Nothing here is implemented, scheduled or
-claimed. Until it is implemented the [north star](../../north-star.md),
+operator the same day (§7). J13 (§4) and J12 (§3) are implemented; §8 lists
+where the J12 implementation departs from or adds to this text. No agent
+compatibility is claimed: the Claude Code A-row (§6.3) and the OpenCode
+rerun under the alias are separate, unrecorded steps. Where this proposal is
+not implemented the [north star](../../north-star.md),
 [Jail v1](jail-v1.md) (revision 24) and [Jail v2](jail-v2.md) govern
 unchanged; where this proposal amends them, §5 says so row by row. The
 milestone names J12, J13 and J14 and the row numbers K33–K54 are
@@ -282,7 +285,10 @@ as read on 2026-10-16:
 - The documentation does **not** say which header carries
   `CLAUDE_CODE_OAUTH_TOKEN` (it documents `Authorization: Bearer` for
   `ANTHROPIC_AUTH_TOKEN` and `X-Api-Key` for `ANTHROPIC_API_KEY`), nor
-  whether the client checks the token's shape locally.
+  whether the client checks the token's shape locally. Both were since
+  measured for Claude Code 2.1.295 in the
+  [setup-token spike](../benchmarks/jail/claude-setup-token-spike-2026-10-16.md):
+  `Authorization: Bearer`, and no local shape check.
 
 This changes the north star's initial input for `claude` (§4.5 table, and
 jail-v1 §12's table): it named `.credentials.json` and `settings.json` from
@@ -347,7 +353,7 @@ mode = "vault"
 source = "@config/credentials/claude-oauth"
 env = "CLAUDE_CODE_OAUTH_TOKEN"
 hosts = ["https://api.anthropic.com"]
-header = { name = "authorization", prefix = "Bearer " }   # measured, not documented
+header = { name = "authorization", prefix = "Bearer " }   # measured (setup-token spike), not documented
 binaries = ["@program"]
 hint = "run `claude setup-token` on this host, then `ukai-jail credential set claude-oauth`"
 
@@ -733,3 +739,89 @@ follows every choice.
    with a `--json` form, `ukai.jail.summary/1`, rendered from the same pure
    summary function, for CI logs and a future GitHub Action job summary
    (§4.5, K54).
+
+## 8. J12 as implemented: departures and additions
+
+Recorded with the implementation (2026-10-16), each with its reason. Where
+the code is stricter than §3 the text above still describes the intent.
+
+1. **`credentials_one_of` absence.** A source counts as absent when its file
+   or a directory on its path does not exist (§3.4 says `ENOENT` on the
+   final component only). A fresh host has no `<config-dir>/credentials/`
+   at all, and the first run must refuse with every hint (§3.5) rather than
+   with one credential's missing directory. A source that exists and is
+   unsafe (mode, owner, a second link, a symlink anywhere on its path) is
+   still refused, never skipped for the next one.
+2. **`@program` on a `#!` script run by a system interpreter refuses**
+   (§3.3 step 7 is silent). The kernel reports the interpreter as the
+   connecting executable, so a binding to the script would refuse every
+   request, and a binding to the interpreter (`/bin/sh`) would admit every
+   script it runs. ELF programs and `#!/usr/bin/env X` expansions bind as
+   §3.3 says.
+3. **The pin also checks owners, and reads "group-writable" as the jail's
+   other directory rules do.** The executable and every directory on its
+   no-follow walk must be owned by root or the operator, and directories
+   above the install root must not be writable by others without the sticky
+   bit (§3.3 step 2 names only the write bits from the install root down): a
+   file another local user owns can be rewritten in place under the very
+   identity a vault credential is bound to. From the install root down, a
+   directory's group write is accepted when the group is the owner's private
+   group (only the owner is in it), the exception the state, launch and
+   credential walks already make: with Ubuntu's default umask 002 a user's
+   own install directories are 0775, and the strict reading refused them on
+   the reference host. The executable file itself stays strictly neither
+   group- nor other-writable, the vault's own executable pin.
+4. **"The operator's home"** is both `HOME` and the user database's entry for
+   the effective uid, each canonicalized: a workspace or install root at or
+   above either refuses.
+5. **Where the home refusal applies.** On `run` (with `--label-only`) and
+   `learn` under `agent`, `tool` and `build`, and on any verb with
+   `--from-path`. `explain` and `doctor` without `--from-path` inspect a plan
+   and do not refuse it, so `ukai-jail doctor` still works from a home
+   directory.
+6. **`roots.cwd` applies to every run**, not only `--from-path` (§3.2 step
+   4): the child starts in the invocation directory whenever it lies
+   strictly beneath the workspace. The field is omitted from the canonical
+   form at the workspace root, so a policy run from its workspace root keeps
+   its bytes and digest.
+7. **`#!/usr/bin/env X` is expanded whenever that `env` is in the runtime
+   roots**, also when `X` resolves inside them (then its root is covered, not
+   granted): inside, `env` would search the fixed contained `PATH` and could
+   run another `X` than the operator's `PATH` names. Only an `env` inside the
+   runtime roots is expanded; any other interpreter named `env` is an
+   ordinary interpreter.
+8. **Identity mismatch is `policy_widening`** at key `--from-path` (exit 125),
+   before release (§3.3 step 3 names no code). A staged `@program` credential
+   whose pinned executable is not the resolved one refuses the same way.
+9. **`doctor` additions are text only**: credential hints, the
+   `credentials_one_of` line, the verb shadowing, "interactive sessions
+   unrecorded", the resolved program and its roots, the expanded-interpreter
+   binding note and the linked-worktree note. The `ukai.jail.doctor/1` JSON
+   is unchanged (§5 lists no doctor schema change). `doctor --from-path`
+   that cannot resolve the program fails with that refusal instead of
+   printing a report.
+10. **`explain` resolves `credentials_one_of` as `run` does**, so with no
+    source present it refuses with every hint; `doctor` inspects every
+    declared credential instead.
+11. **`explain --json`** carries a top-level `program` object (name, path,
+    format, interpreter, argv prefix, each root with `granted` or `covered`)
+    beside the snapshot; the snapshot itself gains the derived read-only
+    roots and `roots.cwd`. The program path and argv are not snapshot
+    fields: argv has its own digest.
+12. **Vault `env`** additionally refuses `SSL_CERT_FILE`,
+    `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE`, which the vault points at
+    its per-attempt CA (a placeholder there would never arrive).
+13. **The pre-exec line** lists every root: `read-only: R` for a grant,
+    `already readable: R under ROOT` for a covered one (the npm layout of the
+    spike record, where the install root lies under `/usr`).
+14. **`credential set` on a terminal reads until end of input** (Enter, then
+    Ctrl-D), with echo off: reading one line would silently keep the first
+    half of a wrapped paste, the spike's failure. A malformed id exits 2,
+    a refusal 1; `credential rm` of an absent id exits 1.
+15. **Mach-O** is accepted as a native executable on macOS, where execution
+    is refused; it only decides what `explain` reports there.
+16. **The milestone freeze records `program_root` and `credentials_one_of`**
+    per bundled launch profile: one changes what is mounted, the other which
+    credential is staged.
+17. **K34's mount boundary** is tested on the walk's decision function with
+    synthetic devices; a test cannot mount a filesystem unprivileged.

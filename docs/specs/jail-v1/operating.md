@@ -502,9 +502,11 @@ With `--from-path` (which the alias implies):
   executable regular file of that name; empty and relative entries are never
   searched. Symlinks are followed to the real file, which is then pinned by a
   no-follow walk from `/`: every directory on the way owned by root or you and
-  not writable by others without the sticky bit, and from the install root
-  down nothing group- or other-writable, the file itself included and owned by
-  root or you. Its argv is `[the real path, ARG...]`.
+  not writable by others without the sticky bit; from the install root down,
+  no directory writable by anyone but its owner (a group write counts only
+  through your private group, so Ubuntu's default umask 002 is fine); the
+  file itself owned by root or you and neither group- nor other-writable. Its
+  argv is `[the real path, ARG...]`.
 - **The install root**, `program_root` levels above the real file (launch
   profile data, default 1: its own directory), is granted read-only and bound
   from the handle the walk took, so the child sees the directory the program

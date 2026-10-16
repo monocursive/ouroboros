@@ -843,9 +843,9 @@ fn k36_every_install_root_refusal_names_its_root() {
     );
     let rw = tools.to_str().unwrap();
     check("inside a --rw root", &base, &["--rw", rw], &fixture.bin);
-    // A group-writable directory in the root refuses at the pin.
-    std::fs::set_permissions(&fixture.bin, std::fs::Permissions::from_mode(0o775)).unwrap();
-    check("group-writable", &base, &[], &fixture.bin);
+    // A directory in the root writable by others refuses at the pin.
+    std::fs::set_permissions(&fixture.bin, std::fs::Permissions::from_mode(0o757)).unwrap();
+    check("writable by others", &base, &[], &fixture.bin);
     std::fs::set_permissions(&fixture.bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     // `@program` cannot bind a `#!` script run by a system interpreter:
     // its connections come from the interpreter.
@@ -937,8 +937,8 @@ fn k38_an_env_interpreter_outside_the_runtime_roots_is_made_explicit() {
         std::fs::Permissions::from_mode(0o755),
     )
     .unwrap();
-    write(&runtime.join("node"), &static_elf(), 0o755);
-    write(&fixture.bin.join("agent"), b"#!/usr/bin/env node\n", 0o755);
+    write(&runtime.join("j12node"), &static_elf(), 0o755);
+    write(&fixture.bin.join("agent"), b"#!/usr/bin/env j12node\n", 0o755);
     let mut path = fixture.path_value();
     path.push(b':');
     path.extend_from_slice(runtime.as_os_str().as_bytes());
@@ -962,7 +962,7 @@ fn k38_an_env_interpreter_outside_the_runtime_roots_is_made_explicit() {
     assert!(report.error.is_none(), "{:?}", report.error);
     let receipt = receipt(&report);
     let expected = ukai_jail::canonical::argv_digest(&[
-        runtime.join("node").as_os_str().as_bytes().to_vec(),
+        runtime.join("j12node").as_os_str().as_bytes().to_vec(),
         fixture.bin.join("agent").as_os_str().as_bytes().to_vec(),
         b"-p".to_vec(),
         b"x".to_vec(),
@@ -993,11 +993,11 @@ fn k38_an_env_interpreter_outside_the_runtime_roots_is_made_explicit() {
         .binaries;
     assert_eq!(
         binaries,
-        &[runtime.join("node").to_str().unwrap().to_owned()]
+        &[runtime.join("j12node").to_str().unwrap().to_owned()]
     );
     for (script, fragment) in [
-        (&b"#!/usr/bin/env -S node --flag\n"[..], "/usr/bin/env"),
-        (b"#!/usr/bin/env node --flag\n", "/usr/bin/env"),
+        (&b"#!/usr/bin/env -S j12node --flag\n"[..], "/usr/bin/env"),
+        (b"#!/usr/bin/env j12node --flag\n", "/usr/bin/env"),
         (b"#!/bin/sh -e -x\n", "/bin/sh"),
         (b"#!/opt/elsewhere/interp\n", "/opt/elsewhere/interp"),
     ] {
@@ -1013,8 +1013,8 @@ fn k38_an_env_interpreter_outside_the_runtime_roots_is_made_explicit() {
         assert!(error.message.contains(fragment), "{}", error.message);
     }
     // A nested script behind `env` refuses naming it.
-    write(&fixture.bin.join("agent"), b"#!/usr/bin/env node\n", 0o755);
-    write(&runtime.join("node"), b"#!/bin/sh\n", 0o755);
+    write(&fixture.bin.join("agent"), b"#!/usr/bin/env j12node\n", 0o755);
+    write(&runtime.join("j12node"), b"#!/bin/sh\n", 0o755);
     let error = refused(
         supervisor::resolve_plan(
             &context(platform()),
@@ -1023,7 +1023,7 @@ fn k38_an_env_interpreter_outside_the_runtime_roots_is_made_explicit() {
         "nested",
     );
     assert!(error.message.contains("nested script"), "{}", error.message);
-    assert!(error.message.contains("node"), "{}", error.message);
+    assert!(error.message.contains("j12node"), "{}", error.message);
 }
 
 // ---------------------------------------------------------------------------
@@ -1326,9 +1326,9 @@ fn k43_doctor_reports_the_binding_hints_and_the_headless_claim() {
     let fixture = Fixture::new();
     let runtime = fixture.root.join("tools/rt");
     mkdir(&runtime, 0o755);
-    write(&runtime.join("node"), &static_elf(), 0o755);
-    write(&fixture.bin.join("node"), &static_elf(), 0o755);
-    write(&fixture.bin.join("agent"), b"#!/usr/bin/env node\n", 0o755);
+    write(&runtime.join("j12node"), &static_elf(), 0o755);
+    write(&fixture.bin.join("j12node"), &static_elf(), 0o755);
+    write(&fixture.bin.join("agent"), b"#!/usr/bin/env j12node\n", 0o755);
     let output = fixture.binary(
         &fixture.repo,
         &["doctor", "--launch", "agent", "--from-path"],
