@@ -858,8 +858,10 @@ pub fn summary(receipt: &Value, journal: Journal<'_>) -> Summary {
         Journal::Unreadable => (None, JournalState::Unreadable),
     };
     // An intact journal whose last note names a receipt other than this one:
-    // the receipt was rewritten after the journal ended (`gc` records a
-    // cleanup that way), so the journal is not this receipt's.
+    // the receipt was rewritten after the journal ended without a note of
+    // its own (a journal `gc` could not append to when it recorded a cleanup,
+    // or a crash between its two writes; jail-v1 §13.3), so the journal is
+    // not this receipt's.
     let another_receipt = state == JournalState::Incomplete
         && scan.as_ref().is_some_and(|scan| {
             !scan.broken && !scan.unrecorded_hole && scan.last_receipt_note.is_some()

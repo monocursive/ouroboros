@@ -66,6 +66,9 @@ use crate::records::{ErrorCode, ErrorStage, JailError, Phase, Receipt, Remediati
 use crate::state::anchored::{Dir, Kind, Name, Stat};
 use crate::state::{self, AttemptDir, VENDOR_STATE_NAME};
 
+mod receipt_note;
+pub use receipt_note::{JournalNote, Replaced};
+
 /// Entries one cleanup pass visits (the §9.1 scan bound, reused).
 pub const DEFAULT_MAX_ENTRIES: usize = 100_000;
 /// Directory descriptors one cleanup pass holds (the §9.1 depth bound).
@@ -617,13 +620,20 @@ pub enum Resume {
     /// Cleanup is not permitted yet; the reason says why.
     Retained(String),
     /// A dry run: cleanup is permitted and would run.
-    WouldRemove,
+    WouldRemove {
+        /// When the receipt would be replaced, what its journal would get
+        /// ([`JournalNote::WouldAppend`], or why not).
+        journal: Option<JournalNote>,
+    },
     /// This pass completed the cleanup and recorded it: in jail state, and
     /// in the receipt only when the receipt itself permits the cleanup (a
     /// `refused` or `settled` receipt, [`permitted_by`]); J4 wave 3, G1.
     Completed {
         /// Whether the receipt was replaced with `state_cleanup = complete`.
         receipt_updated: bool,
+        /// When this pass replaced the receipt, what its journal got
+        /// (jail-v1 §13.3); `None` when it replaced none.
+        journal: Option<JournalNote>,
     },
     /// This pass ran and stopped again; the reason says why.
     StillPending(String),
@@ -631,10 +641,10 @@ pub enum Resume {
     /// the cleanup ([`permitted_by`]), still recorded it pending: a
     /// settlement whose managed-scratch removal stopped. No managed scratch
     /// is left (`gc` removes it first), so this pass recorded `complete` in
-    /// the receipt at its next revision.
-    ReceiptCompleted,
+    /// the receipt at its next revision, and what the journal got.
+    ReceiptCompleted(JournalNote),
     /// A dry run of [`Resume::ReceiptCompleted`].
-    WouldCompleteReceipt,
+    WouldCompleteReceipt(JournalNote),
 }
 
 /// Largest receipt (or `policy.json`) this tool reads back: whoever reads
@@ -689,7 +699,8 @@ pub fn record_bytes(
     Ok(bytes)
 }
 
-fn read_receipt(attempt_dir: &AttemptDir) -> Result<Option<Receipt>, JailError> {
+/// The receipt, and what a journal note must name it by ([`Replaced`]).
+fn read_receipt(attempt_dir: &AttemptDir) -> Result<Option<(Receipt, Replaced)>, JailError> {
     let path = attempt_dir.receipt_path();
     let failure = |detail: String| {
         JailError::new(
@@ -705,7 +716,7 @@ fn read_receipt(attempt_dir: &AttemptDir) -> Result<Option<Receipt>, JailError> 
         return Ok(None);
     };
     serde_json::from_slice(&bytes)
-        .map(Some)
+        .map(|receipt| Some((receipt, Replaced::of_bytes(&bytes))))
         .map_err(|error| failure(error.to_string()))
 }
 
@@ -843,7 +854,11 @@ fn resume_within(
     let Some(registration) = state::vendor_registration(attempt_dir)? else {
         return complete_receipt_without_vendor_state(attempt_dir, dry_run);
     };
-    let mut receipt = read_receipt(attempt_dir)?;
+    let read = read_receipt(attempt_dir)?;
+    let (mut receipt, replaced) = match read {
+        Some((receipt, replaced)) => (Some(receipt), Some(replaced)),
+        None => (None, None),
+    };
     // J4 wave 3 (G1): only a receipt that itself permits the cleanup ever
     // records its completion; any other is the supervisor's and stays as it
     // was, so jail state alone says `complete`.
@@ -861,7 +876,14 @@ fn resume_within(
         return Ok(Resume::Retained(reason.to_owned()));
     }
     if dry_run {
-        return Ok(Resume::WouldRemove);
+        let journal = receipt
+            .as_ref()
+            .zip(replaced.as_ref())
+            .filter(|(receipt, _)| {
+                receipt_records && receipt.state_cleanup != StateCleanup::Complete
+            })
+            .map(|(receipt, replaced)| receipt_note::check(attempt_dir, receipt, replaced));
+        return Ok(Resume::WouldRemove { journal });
     }
     let left = |visited: usize| Limits {
         max_entries: limits.max_entries.saturating_sub(visited),
@@ -907,10 +929,14 @@ fn resume_within(
             result.reason.unwrap_or_else(|| "unknown".to_owned()),
         ));
     }
-    if let Some(receipt) = receipt.as_mut().filter(|_| receipt_records)
+    let mut journal = None;
+    if let Some((receipt, replaced)) = receipt
+        .as_mut()
+        .zip(replaced.as_ref())
+        .filter(|_| receipt_records)
         && receipt.state_cleanup != StateCleanup::Complete
     {
-        complete_receipt(attempt_dir, receipt)?;
+        journal = Some(complete_receipt(attempt_dir, receipt, replaced)?);
     }
     state::record_cleanup_at(
         state::Site::GcResume,
@@ -920,6 +946,7 @@ fn resume_within(
     )?;
     Ok(Resume::Completed {
         receipt_updated: receipt_records,
+        journal,
     })
 }
 
@@ -933,7 +960,7 @@ fn complete_receipt_without_vendor_state(
     attempt_dir: &AttemptDir,
     dry_run: bool,
 ) -> Result<Resume, JailError> {
-    let Some(mut receipt) = read_receipt(attempt_dir)? else {
+    let Some((mut receipt, replaced)) = read_receipt(attempt_dir)? else {
         return Ok(Resume::NothingPending);
     };
     if receipt.state_cleanup != StateCleanup::Pending
@@ -943,25 +970,47 @@ fn complete_receipt_without_vendor_state(
         return Ok(Resume::NothingPending);
     }
     if dry_run {
-        return Ok(Resume::WouldCompleteReceipt);
+        return Ok(Resume::WouldCompleteReceipt(receipt_note::check(
+            attempt_dir,
+            &receipt,
+            &replaced,
+        )));
     }
-    complete_receipt(attempt_dir, &mut receipt)?;
-    Ok(Resume::ReceiptCompleted)
+    Ok(Resume::ReceiptCompleted(complete_receipt(
+        attempt_dir,
+        &mut receipt,
+        &replaced,
+    )?))
 }
 
 /// Records `state_cleanup = complete` in a receipt that permits the cleanup,
 /// at its next revision (P12). It grows by a few bytes, which every writer
 /// leaves room for ([`RECEIPT_WRITE_MAX`]).
+///
+/// Once the new receipt is durable, the attempt's local journal, when it
+/// ended complete on the note of the receipt replaced (`replaced`), gets the
+/// note of the new one, so it stays complete (jail-v1 §13.3,
+/// [`receipt_note`]); what it got is returned. A crash between the two
+/// leaves the journal ending on the replaced receipt's note, which no later
+/// pass can prove named that receipt, so it stays visibly incomplete.
 pub(crate) fn complete_receipt(
     attempt_dir: &AttemptDir,
     receipt: &mut Receipt,
-) -> Result<(), JailError> {
+    replaced: &Replaced,
+) -> Result<JournalNote, JailError> {
     receipt.state_cleanup = StateCleanup::Complete;
     receipt.cleanup_error = None;
     receipt.revision += 1;
     receipt.updated_at = crate::records::rfc3339_utc(std::time::SystemTime::now());
     let bytes = record_bytes("receipt", &*receipt, ErrorStage::Reconciling, RECEIPT_MAX)?;
-    state::replace_atomically_at(state::Site::GcResume, &attempt_dir.receipt_path(), &bytes)
+    state::replace_atomically_at(state::Site::GcResume, &attempt_dir.receipt_path(), &bytes)?;
+    Ok(receipt_note::append(
+        attempt_dir,
+        receipt,
+        &bytes,
+        replaced,
+        crate::trace::LOCAL_CAP,
+    ))
 }
 
 /// Whether `path` names nothing (used by tests and diagnostics only).
@@ -1510,7 +1559,9 @@ mod tests {
         let bytes = serde_json::to_vec_pretty(&receipt).unwrap();
         assert_eq!(bytes.len(), bound, "the receipt sits exactly at the bound");
         std::fs::write(attempt.receipt_path(), &bytes).unwrap();
-        let error = complete_receipt(&attempt, &mut receipt).expect_err("past the bound");
+        let replaced = Replaced::of_bytes(&bytes);
+        let error =
+            complete_receipt(&attempt, &mut receipt, &replaced).expect_err("past the bound");
         assert_eq!(error.code, ErrorCode::StateWriteFailed);
         assert!(error.message.contains("bound"), "{}", error.message);
         assert_eq!(std::fs::read(attempt.receipt_path()).unwrap(), bytes);
@@ -1534,7 +1585,7 @@ mod tests {
             serde_json::to_vec_pretty(&receipt).unwrap(),
         )
         .unwrap();
-        let read = read_receipt(&attempt)
+        let (read, _) = read_receipt(&attempt)
             .expect("the receipt reads")
             .expect("a receipt is there");
         assert_eq!(read.errors[0].code, "a_code_from_another_build");

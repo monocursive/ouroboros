@@ -4907,7 +4907,9 @@ mod tests {
             .expect("at the write bound");
         assert_eq!(rendered_len(&receipt), cleanup::RECEIPT_WRITE_MAX);
         let completed = |receipt: &mut Receipt| {
-            cleanup::complete_receipt(&attempt_dir, receipt).expect("gc completes it");
+            let replaced =
+                cleanup::Replaced::of_bytes(&std::fs::read(attempt_dir.receipt_path()).unwrap());
+            cleanup::complete_receipt(&attempt_dir, receipt, &replaced).expect("gc completes it");
             let bytes = std::fs::read(attempt_dir.receipt_path()).unwrap();
             assert!(u64::try_from(bytes.len()).unwrap() <= cleanup::RECEIPT_MAX);
             serde_json::from_slice::<Receipt>(&bytes).unwrap()

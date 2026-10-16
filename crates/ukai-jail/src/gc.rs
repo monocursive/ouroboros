@@ -156,6 +156,12 @@ pub struct Entry {
     /// `retained: <why>`, `pending: <why>` or `failed: <why>`; `None` when
     /// there were none.
     pub temp_files: Option<String>,
+    /// When this pass replaced the receipt (or a dry run would), what its
+    /// local journal got (jail-v1 §13.3): `appended (wrapper source_seq
+    /// <n>)`, `would_append`, `absent`, `unchanged: <why>` or `failed:
+    /// <why>` ([`cleanup::JournalNote`]); `None` when no receipt was
+    /// replaced.
+    pub journal: Option<String>,
 }
 
 #[cfg(test)]

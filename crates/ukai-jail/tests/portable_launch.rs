@@ -1466,9 +1466,23 @@ fn c02_an_interrupted_cleanup_stays_pending_and_gc_resumes_it() {
     let vendor = attempt_dir(&report).join("vendor-state");
     assert!(vendor.exists());
 
+    // The run's journal ends complete on the pending receipt's note.
+    let trace = attempt_dir(&report).join("trace.ndjson");
+    let journal = std::fs::read(&trace).unwrap();
+    let events = |bytes: &[u8]| -> Vec<serde_json::Value> {
+        bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect()
+    };
+    common::check_trace(&events(&journal), Some(&receipt)).expect("the run's journal");
+
     let dry = fixture.gc(true).expect("a dry run scans");
     assert_eq!(dry.entries[0].action, "would_remove_vendor_state");
+    assert_eq!(dry.entries[0].journal.as_deref(), Some("would_append"));
     assert!(vendor.exists(), "a dry run removes nothing");
+    assert_eq!(std::fs::read(&trace).unwrap(), journal, "nor appends");
 
     if let Some(undo) = release.lock().unwrap().take() {
         undo();
@@ -1483,8 +1497,35 @@ fn c02_an_interrupted_cleanup_stays_pending_and_gc_resumes_it() {
     assert_eq!(after.revision, receipt["revision"].as_u64().unwrap() + 1);
     assert_schema("jail-receipt", &serde_json::to_value(&after).unwrap());
     assert_eq!(jail_state(&report)["state_cleanup"], "complete");
+    // jail-v1 §13.3: gc appended the completed receipt's note to the run's
+    // journal, which is complete again with that receipt as its last.
+    let appended = std::fs::read(&trace).unwrap();
+    assert!(appended.starts_with(&journal));
+    let after_events = events(&appended);
+    assert_eq!(
+        resumed.entries[0].journal.as_deref(),
+        Some(
+            format!(
+                "appended (wrapper source_seq {})",
+                after_events.last().unwrap()["source_seq"]
+            )
+            .as_str()
+        )
+    );
+    let after_value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(attempt_dir(&report).join("jail.json")).unwrap())
+            .unwrap();
+    common::check_trace(&after_events, Some(&after_value)).expect("the journal after gc");
+    assert_eq!(
+        ukai_jail::summary::summarize_attempt(&attempt_dir(&report))
+            .unwrap()
+            .journal,
+        ukai_jail::summary::JournalState::Complete
+    );
     let again = fixture.gc(false).unwrap();
     assert_eq!(again.entries[0].action, "retained", "nothing left to do");
+    assert_eq!(again.entries[0].journal, None);
+    assert_eq!(std::fs::read(&trace).unwrap(), appended);
     assert_outside_untouched(&fixture);
 }
 

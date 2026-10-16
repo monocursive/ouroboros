@@ -14,7 +14,7 @@ use crate::records::JailError;
 
 /// Writes every byte through the seam, one `write` at a time: a short write
 /// is resumed at its offset, and an error after it is the write's error.
-fn write_fully(
+pub(crate) fn write_fully(
     io: &dyn PersistIo,
     site: Site,
     file: &mut File,

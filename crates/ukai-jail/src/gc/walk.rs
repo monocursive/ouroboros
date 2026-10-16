@@ -869,8 +869,29 @@ fn proxy_then_resume(
         outcome,
         Ok(cleanup::Resume::NothingPending
             | cleanup::Resume::Completed { .. }
-            | cleanup::Resume::ReceiptCompleted)
+            | cleanup::Resume::ReceiptCompleted(_))
     );
+    // jail-v1 §13.3: what a replacement of the receipt did, or would do, to
+    // the attempt's local journal. A journal gc could not read or append to
+    // is a failed state access (§6.4: exit 1); one it left as it was is not.
+    if let Ok(
+        cleanup::Resume::Completed {
+            journal: Some(journal),
+            ..
+        }
+        | cleanup::Resume::WouldRemove {
+            journal: Some(journal),
+        }
+        | cleanup::Resume::ReceiptCompleted(journal)
+        | cleanup::Resume::WouldCompleteReceipt(journal),
+    ) = &outcome
+    {
+        if let cleanup::JournalNote::Failed(reason) = journal {
+            incomplete.push(format!("{name} (journal: {reason})"));
+            settled = false;
+        }
+        entry.journal = Some(journal.describe());
+    }
     let (action, reason) = match outcome {
         Ok(cleanup::Resume::NothingPending) => (
             Action::Retained,
@@ -879,6 +900,7 @@ fn proxy_then_resume(
         ),
         Ok(cleanup::Resume::Completed {
             receipt_updated: true,
+            ..
         }) => (
             Action::RemovedVendorState,
             "the pending vendor-state cleanup completed and the receipt records it".to_owned(),
@@ -888,6 +910,7 @@ fn proxy_then_resume(
         // and is never rewritten.
         Ok(cleanup::Resume::Completed {
             receipt_updated: false,
+            ..
         }) => (
             Action::RemovedVendorState,
             "the pending vendor-state cleanup completed; jail state and this report record it \
@@ -895,17 +918,17 @@ fn proxy_then_resume(
              that is not refused or settled)"
                 .to_owned(),
         ),
-        Ok(cleanup::Resume::WouldRemove) => (
+        Ok(cleanup::Resume::WouldRemove { .. }) => (
             Action::WouldRemoveVendorState,
             "the records permit the pending vendor-state cleanup".to_owned(),
         ),
-        Ok(cleanup::Resume::ReceiptCompleted) => (
+        Ok(cleanup::Resume::ReceiptCompleted(_)) => (
             Action::CompletedCleanup,
             "no vendor state was registered and no managed scratch is left, so the receipt's \
              pending cleanup is complete and the receipt records it"
                 .to_owned(),
         ),
-        Ok(cleanup::Resume::WouldCompleteReceipt) => (
+        Ok(cleanup::Resume::WouldCompleteReceipt(_)) => (
             Action::WouldCompleteCleanup,
             "no vendor state was registered and no managed scratch is left, so the receipt's \
              pending cleanup would be recorded complete"

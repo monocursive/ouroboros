@@ -36,7 +36,9 @@ pub use crate::sys::{effective_gid, effective_uid, real_uid};
 pub use durable::{
     Published, TempWrite, create_exclusively_at, leftover_temp_files, replace_atomically,
 };
-pub(crate) use durable::{is_record_temp_name, leftover_temp_files_within, replace_atomically_at};
+pub(crate) use durable::{
+    is_record_temp_name, leftover_temp_files_within, replace_atomically_at, write_fully,
+};
 pub use layout::{
     AttemptDir, AttemptId, JAIL_OWNED_NAMES, SCRATCH_NAME, check_fresh_attempt, data_dir,
 };

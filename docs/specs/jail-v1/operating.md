@@ -465,11 +465,17 @@ retains, and reports with a reason, anything live, unidentifiable, foreign,
 from another boot, with lost integrity, or with records that disagree. It
 never signals a process by a stale PID and never searches `/tmp`, your home or
 the cgroup tree. `gc --dry-run` reports the same actions and changes nothing.
-Receipts, policy and traces are retained; retention is yours to manage.
+Receipts, policy and traces are retained; retention is yours to manage. When
+gc records a completed cleanup in a receipt, it appends that receipt's note
+to the attempt's local journal, so the journal stays complete (jail-v1
+§13.3); a journal that is absent (`--trace-fd`), did not end on the replaced
+receipt's note, or would pass its 64 MiB cap is left as it was.
 
 `gc --json` is an unversioned diagnostic: one entry per attempt with its
 `action`, `reason`, `owner`, `execution_boundary`, `scratch`, `proxy_dir`,
-temporary files and the records gc wrote, plus its per-invocation budget.
+temporary files, the records gc wrote and what the journal got (`journal`:
+`appended (wrapper source_seq <n>)`, `would_append`, `absent`, `unchanged:
+<why>` or `failed: <why>`), plus its per-invocation budget.
 `gc` exits 0 after a completed scan (skips included) and 1 when a cleanup
 failed or stays pending, or state could not be read.
 
@@ -632,10 +638,14 @@ class or an incomplete journal prints `at least`; an unobserved class prints
 `not observed`, never `0`; a journal that disagrees with its receipt prints
 `journal and receipt disagree on <class>` and no number for it. A frame of
 another attempt, or one whose `source_seq` does not increase, ends what is
-counted. A receipt rewritten after the journal's last note (`gc` records a
-completed cleanup that way, without a note) no longer matches the journal,
-so its summary says `journal ends on another receipt's note` and every count
-is a lower bound. A journal over 16 MiB is not scanned and says so; under
+counted. When `gc` records a completed cleanup in the receipt, it appends
+the new receipt's note to a journal that ended on the replaced receipt's
+note (jail-v1 §13.3), so `tail --summary` afterwards prints the same counts
+the run did, without the cleanup line. A receipt rewritten after the
+journal's last note without one (a journal `gc` left as it was, which its
+report's `journal` field explains, or a crash between the two writes) no
+longer matches the journal, so its summary says `journal ends on another
+receipt's note` and every count is a lower bound. A journal over 16 MiB is not scanned and says so; under
 `--trace-fd` the events go to the descriptor and the summary says `no local
 journal`. Uses of a vault credential in a journal written before proxy
 results named their credentials print `uses not recorded`. Nothing about

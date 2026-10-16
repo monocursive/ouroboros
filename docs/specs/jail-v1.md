@@ -1,7 +1,11 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 24, 2026-10-15. No implementation
-or backend conformance is claimed by this document. Revision 24 renames the
+Status: implementation specification, revision 25, 2026-10-16. No implementation
+or backend conformance is claimed by this document. Revision 25 keeps a
+complete local trace complete when `gc` replaces a receipt: `gc` appends the
+new receipt's note, numbered after the trace's last frame and carrying its
+clock reading, and leaves any other trace as it is (§§13.1, 13.3, 14.2).
+Revision 24 renames the
 product from Ouroboros to Ukai: binaries and crates (`ukai-jail`, `ukai-ledger`, `ukai`), environment variables (`UKAI_*`), paths (`/run/ukai`, `~/.config/ukai`, `~/.local/share/ukai`, the protected `.ukai` segment) and record identifiers (`ukai.*`).
 The frozen schemas, the seccomp and closed-set tables and their fixtures were
 re-blessed under the new identifiers (frozen-schemas.toml); evidence recorded
@@ -2508,7 +2512,9 @@ number, so a later revision cannot move a citation silently.
 An event is one UTF-8 JSON object plus newline on the trace pipe or file.
 Future socket transport uses a four-byte unsigned big-endian byte length and
 the same JSON payload, with the same maximum. There is one writer per trace
-stream. `source_seq` starts at 1 independently for each source and never
+stream. After the supervisor ends, `gc` may append the one receipt note
+§13.3 allows to a local trace, under the attempt's lease; it is then that
+stream's writer. `source_seq` starts at 1 independently for each source and never
 restarts within an attempt; its numbers are consecutive except after the
 stream's recorded transport loss (§13.3), because a missing number is a lost
 frame. Events from different sources are not causally
@@ -2765,6 +2771,28 @@ incomplete; a line before the last that is not one is corrupt, which no
 conforming writer produces. A trace is complete only if its last frame is the
 `jail.receipt` note of the attempt's final receipt.
 
+`gc` keeps a complete local trace complete when it replaces a receipt
+(§14.2). Once the new receipt is durable, it appends one wrapper
+`jail.receipt` note naming that receipt's phase and canonical digest,
+numbered one past the last frame's `source_seq`, with its own wall time as
+`observed_at` and the last frame's `monotonic_ns`. The supervisor's clock
+ended with the supervisor, so no later writer has a reading of it: the copy
+is the last point the trace knows on that clock, and the note was written no
+earlier. It appends only to a `trace.ndjson` that is a single-link regular
+file private to the operator, as a state file is (§6.2), whose last line is a
+complete frame and the note of this attempt's receipt it replaced, and only
+while the trace with the note stays within the 64 MiB cap. An operator's
+`UKAI_JAIL_TRACE_CAP` is not recorded, so a larger trace keeps its last
+note, and a trace written under a smaller budget may pass that budget by
+this one note. Any other trace (none under `--trace-fd`, one ending on
+anything else, one the note would take past the cap) is left byte for byte
+as it is. A write that fails part-way is cut back to the trace's previous
+end. `gc` judges only the last frame: an earlier defect (a corrupt line, an
+unrecorded hole) reads the same after the note. A crash between the
+receipt's replacement and the note leaves the trace ending on the replaced
+receipt's note, which no later pass can prove named that receipt, so the
+trace stays visibly incomplete.
+
 Control uses a separate bounded queue with reserved terminal-message capacity;
 trace backpressure cannot delay a stop. Control is polled on every loop
 iteration and gets a final drain bounded by the 1-second no-progress deadline;
@@ -2901,7 +2929,11 @@ report, never to the supervisor's receipt; a record gc repeats is kept once with
 receipt's `state_cleanup` only when that receipt itself permits the cleanup
 (refused, or settled with a verified tree), as J3 specified; permitted only by
 gc's own verification, jail state and gc's report record it and the receipt is
-left as written. gc reads the leaf from jail state, where the
+left as written. A receipt gc completes keeps its trace complete: gc appends
+the completed receipt's note as §13.3 states, and its report's `journal`
+field says what the trace got (`appended (wrapper source_seq <n>)`,
+`would_append` in a dry run, `absent`, `unchanged: <why>`, or `failed:
+<why>`, a failed state access that exits 1). gc reads the leaf from jail state, where the
 supervisor registers it by name before creating it and by device and inode
 right after, before anything is placed in it; a receipt naming another leaf is
 a disagreement and is retained. A leaf registered by name only is removed when

@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{Value, json};
+use ukai_jail::cleanup::{self, JournalNote};
+use ukai_jail::state::AttemptDir;
 use ukai_jail::summary::{self, Journal, JournalState, Summary};
 
 const ATTEMPT: &str = "att_00000000-0000-4000-8000-000000000001";
@@ -2111,7 +2113,8 @@ fn review_bytes_after_the_final_note_make_the_journal_incomplete() {
 
 /// The final note binds the journal to one receipt: a note naming another
 /// receipt (here, the receipt before `gc` recorded its cleanup complete,
-/// cleanup.rs `complete_receipt`) leaves the journal incomplete
+/// as a journal gc could not append the new note to is left; the F2 tests
+/// below cover the note gc does append) leaves the journal incomplete
 /// (kills: digest equality replaced by `true`).
 #[test]
 fn review_a_note_for_another_receipt_is_not_completeness() {
@@ -2597,5 +2600,546 @@ fn a_lower_bound_prints_only_what_was_seen() {
     assert_eq!(
         texts(&summary)[1],
         "workspace: none recorded (a lower bound)"
+    );
+}
+
+// ===========================================================================
+// gc's receipt replacement keeps the journal complete (adversarial review
+// F2; jail-v1 §13.3): after `gc` records a completed cleanup, the summary of
+// the attempt is the one the run printed, less its pending-cleanup line
+// ===========================================================================
+
+/// The jail state a claim leaves (§7): no owner, vendor state or boundary
+/// to reconcile, so the resumption reads only the receipt and the journal.
+fn claimed_state(attempt_id: &str) -> Value {
+    json!({
+        "schema": "ukai.jail.state/1",
+        "attempt_id": attempt_id,
+        "os": "linux",
+        "arch": "x86_64",
+        "kernel": "simulated",
+        "component_version": "0.0.0",
+        "claimed_at": "2026-09-21T12:00:00Z",
+        "owner": null,
+        "boundary": null,
+        "vendor_state": null,
+        "state_cleanup": "not_needed",
+    })
+}
+
+/// `bytes` as a private (0600) state file at `path`, as the supervisor
+/// writes its records and its journal.
+fn private_file(path: &Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::write(path, bytes).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// An attempt root under `parent` holding `fixture`'s receipt, jail state
+/// and, when given, `journal`.
+fn recorded(parent: &Path, fixture: &Fixture, journal: Option<&[u8]>) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let attempt = parent.join(ATTEMPT);
+    std::fs::create_dir(&attempt).unwrap();
+    std::fs::set_permissions(&attempt, std::fs::Permissions::from_mode(0o700)).unwrap();
+    private_file(
+        &attempt.join("jail.json"),
+        &serde_json::to_vec_pretty(&fixture.receipt).unwrap(),
+    );
+    private_file(
+        &attempt.join("jail-state.json"),
+        &serde_json::to_vec_pretty(&claimed_state(ATTEMPT)).unwrap(),
+    );
+    if let Some(journal) = journal {
+        private_file(&attempt.join("trace.ndjson"), journal);
+    }
+    attempt
+}
+
+/// The every-class run, settled with its cleanup still pending (the
+/// supervisor's managed-scratch removal stopped), which `gc` completes.
+fn cleanup_pending() -> Fixture {
+    let mut fixture = every_class();
+    fixture.receipt["state_cleanup"] = json!("pending");
+    fixture.receipt["cleanup_error"] = json!("scratch_removal_failed: cleanup_budget_exhausted");
+    fixture
+}
+
+/// gc's resumption of `attempt`'s cleanup (gc/walk.rs runs exactly this
+/// once it holds the lease).
+fn gc_resume(attempt: &Path, dry_run: bool) -> cleanup::Resume {
+    cleanup::resume_with(
+        &AttemptDir::from_root(attempt.to_path_buf()),
+        dry_run,
+        cleanup::Limits::DEFAULT,
+        false,
+    )
+    .expect("the resumption reads its records")
+    .outcome
+}
+
+fn lines_except_cleanup(summary: &Summary) -> Vec<Value> {
+    summary
+        .lines
+        .iter()
+        .filter(|line| line.line != "cleanup")
+        .map(|line| json!({"line": line.line, "text": line.text, "facts": line.facts}))
+        .collect()
+}
+
+fn frames(journal: &[u8]) -> Vec<Value> {
+    journal
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("a frame"))
+        .collect()
+}
+
+/// F2: the summary of an attempt whose cleanup gc completed is the summary
+/// the run printed: a complete journal, the same exact count in every
+/// class, the same exec→settled time, and only the pending-cleanup line
+/// gone. gc appended one note naming the new receipt, after the journal's
+/// bytes, numbered after the last frame and on its clock, and the journal
+/// passes every schema and semantic rule with the new receipt as final.
+#[test]
+fn f2_gc_completing_a_cleanup_keeps_the_journal_complete_and_every_count() {
+    let temp = common::private_tempdir();
+    let fixture = cleanup_pending();
+    let journal = fixture.journal();
+    let attempt = recorded(temp.path(), &fixture, Some(&journal));
+    let before = summary::summarize_attempt(&attempt).expect("the run's summary");
+    assert_eq!(before.journal, JournalState::Complete);
+    assert_eq!(before.to_json(), fixture.summary().to_json());
+    assert!(
+        texts(&before)
+            .last()
+            .unwrap()
+            .contains("vendor state cleanup pending")
+    );
+    let last = fixture.final_note();
+
+    let outcome = gc_resume(&attempt, false);
+    let seq = last["source_seq"].as_u64().unwrap() + 1;
+    assert_eq!(
+        outcome,
+        cleanup::Resume::ReceiptCompleted(JournalNote::Appended(seq))
+    );
+    let receipt: Value =
+        serde_json::from_slice(&std::fs::read(attempt.join("jail.json")).unwrap()).unwrap();
+    assert_eq!(receipt["state_cleanup"], "complete");
+    assert_eq!(
+        receipt["revision"],
+        json!(fixture.receipt["revision"].as_u64().unwrap() + 1)
+    );
+
+    let after = summary::summarize_attempt(&attempt).expect("the summary after gc");
+    assert_eq!(
+        after.journal,
+        JournalState::Complete,
+        "{:#?}",
+        texts(&after)
+    );
+    assert_eq!(after.receipt_digest, Some(digest(&receipt)));
+    // K52's independent script agrees, from the two files alone.
+    recompute(&attempt, &after.to_json());
+    assert_eq!(lines_except_cleanup(&after), lines_except_cleanup(&before));
+    assert!(after.lines.iter().all(|line| line.line != "cleanup"));
+    for line in ["workspace", "network"] {
+        assert_eq!(facts(&after, line)["bound"], "exact", "{line}");
+    }
+    // The note carries the last frame's clock, so the exec→settled time is
+    // the run's.
+    assert!(facts(&after, "status")["exec_to_settled_ms"].is_u64());
+    assert_eq!(
+        facts(&after, "status")["exec_to_settled_ms"],
+        facts(&before, "status")["exec_to_settled_ms"]
+    );
+
+    // The journal's bytes are kept; one note follows them.
+    let written = std::fs::read(attempt.join("trace.ndjson")).unwrap();
+    assert!(written.starts_with(&journal));
+    let events = frames(&written);
+    assert_eq!(events.len(), frames(&journal).len() + 1);
+    let note = events.last().unwrap();
+    assert_eq!(note["source"], "wrapper");
+    assert_eq!(note["operation"], "jail.receipt");
+    assert_eq!(note["source_seq"], json!(seq));
+    assert_eq!(note["monotonic_ns"], last["monotonic_ns"]);
+    assert_eq!(note["fields"]["phase"], "settled");
+    assert_eq!(note["fields"]["receipt_digest"], json!(digest(&receipt)));
+    // The fixture's own frames are summary fixtures, not schema-complete
+    // audit results: the stream is held to the semantic rules (one attempt,
+    // sequence without a hole, notes in lifecycle order, ending on the final
+    // receipt's note), and gc's note to the producer schema too.
+    let mut violations = ukai_jail::records::semantic::trace(&events);
+    violations.extend(ukai_jail::records::semantic::trace_ends_with(
+        &events, &receipt,
+    ));
+    assert!(violations.is_empty(), "{violations:?}");
+    let errors: Vec<String> = common::validators()["jail-event"]
+        .iter_errors(note)
+        .map(|error| format!("{error} at {}", error.instance_path()))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}\n{note:#}");
+    common::check_receipt(&receipt).expect("the completed receipt is valid");
+
+    // Nothing is left: a second pass changes nothing.
+    assert_eq!(gc_resume(&attempt, false), cleanup::Resume::NothingPending);
+    assert_eq!(
+        std::fs::read(attempt.join("trace.ndjson")).unwrap(),
+        written
+    );
+}
+
+/// A refused receipt is completed the same way, and its note keeps the
+/// refused phase (no note leaves `refused`, §13.2).
+#[test]
+fn f2_a_refused_receipt_completed_by_gc_keeps_its_journal_complete() {
+    let temp = common::private_tempdir();
+    let mut fixture = Fixture::from(example("receipt-exec-refused.json"));
+    fixture.receipt["attempt_id"] = json!(ATTEMPT);
+    fixture.receipt["state_cleanup"] = json!("pending");
+    common::check_receipt(&fixture.receipt).expect("a refused receipt with its cleanup pending");
+    fixture.lifecycle("prepared");
+    let journal = fixture.journal();
+    let attempt = recorded(temp.path(), &fixture, Some(&journal));
+    let outcome = gc_resume(&attempt, false);
+    let cleanup::Resume::ReceiptCompleted(JournalNote::Appended(_)) = outcome else {
+        panic!("{outcome:?}");
+    };
+    let receipt: Value =
+        serde_json::from_slice(&std::fs::read(attempt.join("jail.json")).unwrap()).unwrap();
+    assert_eq!(receipt["phase"], "refused");
+    let events = frames(&std::fs::read(attempt.join("trace.ndjson")).unwrap());
+    assert_eq!(events.last().unwrap()["fields"]["phase"], "refused");
+    let mut violations = ukai_jail::records::semantic::trace(&events);
+    violations.extend(ukai_jail::records::semantic::trace_ends_with(
+        &events, &receipt,
+    ));
+    assert!(violations.is_empty(), "{violations:?}");
+    assert_eq!(
+        summary::summarize_attempt(&attempt).unwrap().journal,
+        JournalState::Complete
+    );
+}
+
+/// A journal that is one frame, the receipt's note, gets the next one.
+#[test]
+fn f2_a_journal_of_one_note_gets_the_next_one() {
+    let temp = common::private_tempdir();
+    let mut fixture = cleanup_pending();
+    fixture.events.clear();
+    fixture.seq.clear();
+    let journal = fixture.journal();
+    let attempt = recorded(temp.path(), &fixture, Some(&journal));
+    assert_eq!(
+        gc_resume(&attempt, false),
+        cleanup::Resume::ReceiptCompleted(JournalNote::Appended(2))
+    );
+    let written = std::fs::read(attempt.join("trace.ndjson")).unwrap();
+    assert!(written.starts_with(&journal));
+    assert_eq!(frames(&written).len(), 2);
+}
+
+/// A dry run says the note would be appended and writes nothing.
+#[test]
+fn f2_a_dry_run_says_the_note_would_be_appended_and_changes_nothing() {
+    let temp = common::private_tempdir();
+    let fixture = cleanup_pending();
+    let journal = fixture.journal();
+    let attempt = recorded(temp.path(), &fixture, Some(&journal));
+    let receipt = std::fs::read(attempt.join("jail.json")).unwrap();
+    assert_eq!(
+        gc_resume(&attempt, true),
+        cleanup::Resume::WouldCompleteReceipt(JournalNote::WouldAppend)
+    );
+    assert_eq!(std::fs::read(attempt.join("jail.json")).unwrap(), receipt);
+    assert_eq!(
+        std::fs::read(attempt.join("trace.ndjson")).unwrap(),
+        journal
+    );
+}
+
+/// Every journal gc must not append to is left byte for byte as it was,
+/// while the receipt's cleanup is still completed, and gc says why: no
+/// journal (`--trace-fd`), one that does not end complete on the note of
+/// the receipt gc replaced, and one that is not a private regular file of
+/// the operator. The summary then says what it said before gc, or that the
+/// journal ends on another receipt's note.
+#[test]
+fn f2_a_journal_gc_must_not_touch_is_left_byte_identical() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = cleanup_pending();
+    let complete = fixture.journal();
+    let mut torn = complete.clone();
+    torn.extend_from_slice(b"{\"schema\":\"ukai.event/1\",\"source\":\"au");
+    let mut corrupt_tail = complete.clone();
+    corrupt_tail.extend_from_slice(b"not a frame\n");
+    let mut other_receipt = fixture.clone();
+    other_receipt.receipt["revision"] = json!(1);
+    let mut other_attempt = fixture.final_note();
+    other_attempt["attempt_id"] = json!("att_00000000-0000-4000-8000-000000000002");
+    let mut wrong_phase = fixture.final_note();
+    wrong_phase["fields"]["phase"] = json!("enforced");
+    let mut other_schema = fixture.final_note();
+    other_schema["schema"] = json!("ukai.event/2");
+    let mut unnumbered = fixture.final_note();
+    unnumbered.as_object_mut().unwrap().remove("source_seq");
+    let mut padded_clock = fixture.final_note();
+    padded_clock["monotonic_ns"] = json!(format!(
+        "0{}",
+        padded_clock["monotonic_ns"].as_str().unwrap()
+    ));
+    let mut overlong = complete.clone();
+    overlong.extend(std::iter::repeat_n(b'x', ukai_jail::journal::FRAME_MAX + 1));
+    overlong.push(b'\n');
+    let mut lifecycle_last = fixture.clone();
+    lifecycle_last.lifecycle("settled");
+    let with = |last: &Value| {
+        let mut events = fixture.events.clone();
+        events.push(last.clone());
+        Fixture::lines_of(&events)
+    };
+    let cases: Vec<(&str, Option<Vec<u8>>, &str)> = vec![
+        ("absent", None, "absent"),
+        ("empty", Some(Vec::new()), "unchanged: it is empty"),
+        (
+            "torn",
+            Some(torn),
+            "unchanged: its last line is not a complete frame",
+        ),
+        (
+            "corrupt tail",
+            Some(corrupt_tail),
+            "unchanged: its last line is not a frame",
+        ),
+        (
+            "without its final note",
+            Some(fixture.journal_without_note()),
+            "unchanged: its last frame is not a receipt note",
+        ),
+        (
+            "ending on a lifecycle note",
+            Some(lifecycle_last.journal_without_note()),
+            "unchanged: its last frame is not a receipt note",
+        ),
+        (
+            "ending on another receipt's note",
+            Some(other_receipt.journal()),
+            "unchanged: it ends on the note of a receipt other than the one gc replaced",
+        ),
+        (
+            "ending on another attempt's note",
+            Some(with(&other_attempt)),
+            "unchanged: its last frame is another attempt's",
+        ),
+        (
+            "naming another phase",
+            Some(with(&wrong_phase)),
+            "unchanged: it ends on the note of a receipt other than the one gc replaced",
+        ),
+        (
+            "of another schema",
+            Some(with(&other_schema)),
+            "unchanged: its last frame is not a receipt note",
+        ),
+        (
+            "without a source_seq",
+            Some(with(&unnumbered)),
+            "unchanged: its last note has no usable source_seq",
+        ),
+        (
+            "with a clock that is not a canonical decimal",
+            Some(with(&padded_clock)),
+            "unchanged: its last note has no clock reading",
+        ),
+        (
+            "ending on a line longer than a frame",
+            Some(overlong),
+            "unchanged: its last line is longer than a frame",
+        ),
+    ];
+    for (case, journal, said) in cases {
+        let temp = common::private_tempdir();
+        let attempt = recorded(temp.path(), &fixture, journal.as_deref());
+        let before = summary::summarize_attempt(&attempt).unwrap();
+        match gc_resume(&attempt, false) {
+            cleanup::Resume::ReceiptCompleted(note) => assert_eq!(note.describe(), said, "{case}"),
+            other => panic!("{case}: {other:?}"),
+        }
+        let trace = attempt.join("trace.ndjson");
+        match &journal {
+            Some(bytes) => assert_eq!(&std::fs::read(&trace).unwrap(), bytes, "{case}"),
+            None => assert!(!trace.exists(), "{case}"),
+        }
+        let receipt: Value =
+            serde_json::from_slice(&std::fs::read(attempt.join("jail.json")).unwrap()).unwrap();
+        assert_eq!(receipt["state_cleanup"], "complete", "{case}");
+        let after = summary::summarize_attempt(&attempt).unwrap();
+        assert_ne!(after.journal, JournalState::Complete, "{case}");
+        assert_eq!(
+            after.journal,
+            if journal.is_some() {
+                JournalState::Incomplete
+            } else {
+                before.journal
+            },
+            "{case}"
+        );
+    }
+
+    // A journal that is not the operator's private regular file is a
+    // failed state access, and is not touched either.
+    let temp = common::private_tempdir();
+    let attempt = recorded(temp.path(), &fixture, Some(&complete));
+    let trace = attempt.join("trace.ndjson");
+    std::fs::set_permissions(&trace, std::fs::Permissions::from_mode(0o644)).unwrap();
+    match gc_resume(&attempt, false) {
+        cleanup::Resume::ReceiptCompleted(JournalNote::Failed(reason)) => {
+            assert!(reason.contains("0644"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(std::fs::read(&trace).unwrap(), complete);
+
+    let temp = common::private_tempdir();
+    let attempt = recorded(temp.path(), &fixture, None);
+    let elsewhere = temp.path().join("elsewhere.ndjson");
+    private_file(&elsewhere, &complete);
+    std::os::unix::fs::symlink(&elsewhere, attempt.join("trace.ndjson")).unwrap();
+    let outcome = gc_resume(&attempt, false);
+    let cleanup::Resume::ReceiptCompleted(JournalNote::Failed(_)) = outcome else {
+        panic!("a symlinked journal: {outcome:?}");
+    };
+    assert_eq!(std::fs::read(&elsewhere).unwrap(), complete);
+
+    let temp = common::private_tempdir();
+    let attempt = recorded(temp.path(), &fixture, Some(&complete));
+    std::fs::hard_link(
+        attempt.join("trace.ndjson"),
+        temp.path().join("second-name"),
+    )
+    .unwrap();
+    let outcome = gc_resume(&attempt, false);
+    let cleanup::Resume::ReceiptCompleted(JournalNote::Failed(reason)) = outcome else {
+        panic!("a journal with two names: {outcome:?}");
+    };
+    assert!(reason.contains("links"), "{reason}");
+    assert_eq!(
+        std::fs::read(attempt.join("trace.ndjson")).unwrap(),
+        complete
+    );
+}
+
+/// The cap: a journal the note would take past 64 MiB keeps its last note
+/// (§13.3), byte for byte. The journal is sparse: only its tail is real.
+#[test]
+fn f2_a_journal_the_note_would_take_past_the_cap_is_left_as_it_is() {
+    use std::io::{Seek as _, Write as _};
+    let fixture = cleanup_pending();
+    let note = Fixture::lines_of(&[fixture.final_note()]);
+    // The note is a few hundred bytes: 16 bytes of room is too little, 4 KiB
+    // is enough.
+    for (case, room, appended) in [("no room", 16_u64, false), ("room", 4096, true)] {
+        let temp = common::private_tempdir();
+        let attempt = recorded(temp.path(), &fixture, Some(b""));
+        let path = attempt.join("trace.ndjson");
+        // Zeros, an LF closing that line, then the last note: the line
+        // before the note is never read.
+        let size = ukai_jail::trace::LOCAL_CAP - room;
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(size - note.len() as u64 - 1).unwrap();
+        file.seek(std::io::SeekFrom::End(0)).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.write_all(&note).unwrap();
+        drop(file);
+        let len = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(len, size);
+        let tail_of = |path: &Path| {
+            use std::os::unix::fs::FileExt as _;
+            let file = std::fs::File::open(path).unwrap();
+            let mut tail = vec![0; 1024];
+            let at = file.metadata().unwrap().len() - 1024;
+            file.read_exact_at(&mut tail, at).unwrap();
+            tail
+        };
+        let tail = tail_of(&path);
+        let outcome = gc_resume(&attempt, false);
+        if appended {
+            let cleanup::Resume::ReceiptCompleted(JournalNote::Appended(_)) = outcome else {
+                panic!("{case}: {outcome:?}");
+            };
+            assert!(std::fs::metadata(&path).unwrap().len() <= ukai_jail::trace::LOCAL_CAP);
+            continue;
+        }
+        let cleanup::Resume::ReceiptCompleted(JournalNote::Unchanged(reason)) = outcome else {
+            panic!("{case}: {outcome:?}");
+        };
+        assert!(reason.contains("cap"), "{reason}");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), len, "{case}");
+        assert_eq!(tail_of(&path), tail, "{case}");
+    }
+}
+
+/// A write that fails part-way is cut back to where the journal ended, so
+/// it ends on the replaced receipt's note, byte for byte, and gc reports
+/// the failure (a failed state access: `gc` exits 1).
+#[test]
+fn f2_a_failed_append_is_cut_back_to_the_journals_previous_end() {
+    use std::sync::{Arc, Mutex};
+    /// Writes the first half of the note, then fails.
+    struct HalfNote {
+        calls: Mutex<u32>,
+    }
+    impl ukai_jail::state::PersistIo for HalfNote {
+        fn write(
+            &self,
+            site: ukai_jail::state::Site,
+            file: &mut std::fs::File,
+            bytes: &[u8],
+        ) -> std::io::Result<usize> {
+            use std::io::Write as _;
+            let mut calls = self.calls.lock().unwrap();
+            let note = site == ukai_jail::state::Site::GcResume
+                && (*calls > 0 || bytes.starts_with(b"{\"schema\":\"ukai.event/1\""));
+            if !note {
+                return file.write(bytes);
+            }
+            *calls += 1;
+            if *calls == 1 {
+                return file.write(&bytes[..bytes.len() / 2]);
+            }
+            Err(std::io::Error::other("no space left (simulated)"))
+        }
+    }
+    let temp = common::private_tempdir();
+    let fixture = cleanup_pending();
+    let journal = fixture.journal();
+    let attempt = recorded(temp.path(), &fixture, Some(&journal));
+    let io = Arc::new(HalfNote {
+        calls: Mutex::new(0),
+    });
+    let outcome = ukai_jail::state::with_persist_io(io.clone(), || gc_resume(&attempt, false));
+    let cleanup::Resume::ReceiptCompleted(JournalNote::Failed(reason)) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(reason.contains("simulated"), "{reason}");
+    assert_eq!(
+        *io.calls.lock().unwrap(),
+        2,
+        "half the note, then the failure"
+    );
+    assert_eq!(
+        std::fs::read(attempt.join("trace.ndjson")).unwrap(),
+        journal
+    );
+    let after = summary::summarize_attempt(&attempt).unwrap();
+    assert_eq!(after.journal, JournalState::Incomplete);
+    assert!(
+        texts(&after)
+            .iter()
+            .any(|text| text.contains("journal ends on another receipt's note")),
+        "{:?}",
+        texts(&after)
     );
 }

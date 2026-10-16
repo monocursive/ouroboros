@@ -701,6 +701,15 @@ fn gc_text(report: &ukai_jail::gc::Report) -> String {
                 records::escape_control(temp_files)
             );
         }
+        // jail-v1 §13.3: the receipt note gc appended, or why not
+        if let Some(journal) = &entry.journal {
+            let _ = writeln!(
+                out,
+                "{} journal {}",
+                attempt_id,
+                records::escape_control(journal)
+            );
+        }
     }
     let _ = writeln!(out, "scanned {}", report.entries.len());
     // S7, S9
@@ -741,6 +750,8 @@ fn gc_json(report: &ukai_jail::gc::Report) -> serde_json::Value {
                 // J4 W2-S: leftover `.tmp` files a crash left (§7)
                 "leftover_temp_files": entry.leftover_temp_files,
                 "temp_files": entry.temp_files,
+                // jail-v1 §13.3: the receipt note gc appended, or why not
+                "journal": entry.journal,
             }))
             .collect::<Vec<_>>(),
         // S7 and S9
@@ -1142,6 +1153,31 @@ mod tests {
                 "limit inodes=6 required=false",
                 "limit cpu=7 required=true",
             ],
+            "{text}"
+        );
+    }
+
+    /// jail-v1 §13.3: what a replaced receipt's journal got is one `journal`
+    /// value in both renderings, absent from both when no receipt was
+    /// replaced, and escaped in the text one.
+    #[test]
+    fn gc_reports_what_the_journal_got_in_both_renderings() {
+        let mut report = gc_report(None);
+        assert_eq!(
+            gc_json(&report)["entries"][0]["journal"],
+            serde_json::Value::Null
+        );
+        assert!(!gc_text(&report).contains(" journal "));
+        report.entries[0].journal = Some("unchanged: \u{1b}[2J".to_owned());
+        assert_eq!(
+            gc_json(&report)["entries"][0]["journal"],
+            "unchanged: \u{1b}[2J"
+        );
+        let text = gc_text(&report);
+        assert!(
+            text.contains(
+                "att_00000000-0000-4000-8000-000000000001 journal unchanged: <U+001B>[2J"
+            ),
             "{text}"
         );
     }

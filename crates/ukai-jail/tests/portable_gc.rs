@@ -1566,6 +1566,135 @@ mod scripted {
         }
     }
 
+    /// A journal ending on the note of `receipt`, as the run left it: a
+    /// lifecycle note, then the receipt's note (jail-v1 §13.3).
+    fn journal_ending_on(dir: &AttemptDir, receipt: &Value) -> Vec<u8> {
+        let frame = |seq: u64, operation: &str, fields: Value| {
+            json!({
+                "schema": "ukai.event/1",
+                "attempt_id": receipt["attempt_id"],
+                "source": "wrapper",
+                "source_seq": seq,
+                "observed_at": "2026-09-23T00:00:00Z",
+                "monotonic_ns": (seq * 1000).to_string(),
+                "operation": operation,
+                "stage": "result",
+                "decision": null,
+                "outcome": {"ok": true, "return_value": null, "errno": null,
+                            "completion": "wrapper"},
+                "fields": fields,
+            })
+        };
+        let digest = ukai_jail::records::semantic::receipt_digest(receipt).unwrap();
+        let mut bytes = Vec::new();
+        for event in [
+            frame(
+                1,
+                "note",
+                json!({"kind": "lifecycle", "transition": "prepared"}),
+            ),
+            frame(
+                2,
+                "jail.receipt",
+                json!({"phase": receipt["phase"], "receipt_digest": digest}),
+            ),
+        ] {
+            bytes.extend(serde_json::to_vec(&event).unwrap());
+            bytes.push(b'\n');
+        }
+        private_file(&dir.trace_path(), &bytes);
+        bytes
+    }
+
+    /// jail-v1 §13.3, §14.2: when gc records the completed cleanup in the
+    /// receipt, it appends that receipt's note to the journal, which then
+    /// ends complete on it, and its report says so (`journal`); a dry run
+    /// says it would and writes nothing.
+    #[test]
+    fn completing_a_receipt_appends_its_note_to_the_journal() {
+        let fixture = Fixture::new();
+        let (id, dir, receipt) = settled_with_scratch_left(&fixture, 1);
+        let journal = journal_ending_on(&dir, &receipt);
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+        // While managed scratch is left, a dry run predicts its removal only
+        // (the receipt waits for it); without it, the completion and the note.
+        let report = run(&fixture, &host, true);
+        assert_eq!(only(&report, &id).journal, None);
+        std::fs::remove_dir_all(dir.root().join(state::SCRATCH_NAME)).unwrap();
+        let report = run(&fixture, &host, true);
+        assert_eq!(only(&report, &id).journal.as_deref(), Some("would_append"));
+        assert_eq!(std::fs::read(dir.trace_path()).unwrap(), journal);
+
+        let report = run(&fixture, &host, false);
+        let entry = only(&report, &id);
+        assert_eq!(entry.action, "completed_cleanup", "{entry:?}");
+        assert_eq!(
+            entry.journal.as_deref(),
+            Some("appended (wrapper source_seq 3)"),
+            "{entry:?}"
+        );
+        assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
+        let after = read_json(&dir.receipt_path());
+        let bytes = std::fs::read(dir.trace_path()).unwrap();
+        assert!(bytes.starts_with(&journal));
+        let events: Vec<Value> = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        common::check_trace(&events, Some(&after)).expect("the journal ends on the new receipt");
+        assert_eq!(events[2]["monotonic_ns"], "2000", "the last frame's clock");
+    }
+
+    /// A journal gc cannot append to (here, not private) is a failed state
+    /// access: the cleanup is still recorded, the report names the journal
+    /// in `incomplete` (gc exits 1) and the attempt is not finished on that
+    /// pass. The journal is untouched; the next pass has nothing left.
+    #[test]
+    fn a_journal_gc_cannot_append_to_is_reported_and_left_untouched() {
+        let fixture = Fixture::new();
+        let (id, dir, _) = settled_with_scratch_left(&fixture, 1);
+        let receipt = read_json(&dir.receipt_path());
+        let journal = journal_ending_on(&dir, &receipt);
+        std::fs::set_permissions(dir.trace_path(), std::fs::Permissions::from_mode(0o640)).unwrap();
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+        let report = run(&fixture, &host, false);
+        let entry = only(&report, &id);
+        assert!(
+            entry
+                .journal
+                .as_deref()
+                .is_some_and(|journal| journal.starts_with("failed: ")),
+            "{entry:?}"
+        );
+        assert!(
+            report
+                .incomplete
+                .iter()
+                .any(|item| item.starts_with(&id) && item.contains("journal: ")),
+            "{:?}",
+            report.incomplete
+        );
+        assert_eq!(read_json(&dir.receipt_path())["state_cleanup"], "complete");
+        assert_eq!(std::fs::read(dir.trace_path()).unwrap(), journal);
+        let actions = |dir: &AttemptDir| -> Vec<String> {
+            read_json(&dir.state_path())["gc_actions"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|action| action["action"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert!(!actions(&dir).contains(&"gc_finished".to_owned()));
+
+        let report = run(&fixture, &host, false);
+        assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
+        assert_eq!(only(&report, &id).journal, None);
+        assert!(actions(&dir).contains(&"gc_finished".to_owned()));
+        assert_eq!(std::fs::read(dir.trace_path()).unwrap(), journal);
+    }
+
     /// The same removal under a bound smaller than the tree: each pass
     /// removes what the bound allows and reports the rest pending (§6.4:
     /// exit 1), the next pass goes on from there, and the receipt records
