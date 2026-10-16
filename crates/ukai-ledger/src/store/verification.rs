@@ -198,6 +198,7 @@ impl Target {
         self.reread(proceed).unwrap_or_else(|error| VerifyReport {
             run_id,
             local_consistency: false,
+            authenticity: crate::protocol::AUTHENTICITY_BOUND.to_owned(),
             child_protection,
             coverage,
             events: 0,
@@ -289,6 +290,7 @@ impl Target {
         Ok(VerifyReport {
             run_id: self.run_id,
             local_consistency: problems.is_empty(),
+            authenticity: crate::protocol::AUTHENTICITY_BOUND.to_owned(),
             child_protection: stream.run().child_protection,
             coverage: crate::reader::coverage_summary(&stream.run().coverage),
             events: loaded.events,

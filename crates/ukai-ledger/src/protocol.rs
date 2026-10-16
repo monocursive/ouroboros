@@ -402,11 +402,25 @@ pub struct GcPlan {
     pub next_after: Option<String>,
 }
 
+/// The trust bound every verify report states: the writer authenticates its
+/// peers as the local uid only, so a report proves the internal consistency
+/// of this store's records — never that a same-uid process could not have
+/// written them (security audit 2026-10-15, finding L1).
+pub const AUTHENTICITY_BOUND: &str = "bounded_by_local_uid";
+
+fn authenticity_bound() -> String {
+    AUTHENTICITY_BOUND.to_owned()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerifyReport {
     pub run_id: String,
     pub local_consistency: bool,
+    /// The bound of what verification can say about authorship; see
+    /// [`AUTHENTICITY_BOUND`].
+    #[serde(default = "authenticity_bound")]
+    pub authenticity: String,
     pub child_protection: ChildProtection,
     pub coverage: Value,
     pub events: u64,

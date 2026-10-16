@@ -486,6 +486,7 @@ pub(super) fn verify_pruned(
     VerifyReport {
         run_id: id.into(),
         local_consistency: checked.is_ok(),
+        authenticity: crate::protocol::AUTHENTICITY_BOUND.to_owned(),
         child_protection: run.child_protection,
         coverage: crate::reader::coverage_summary(&run.coverage),
         events: 0,
