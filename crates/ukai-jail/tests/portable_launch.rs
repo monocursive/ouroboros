@@ -528,11 +528,12 @@ fn i02_the_bundled_profiles_are_valid_experimental_data_for_the_agent_jail() {
             "{name} must say it is experimental"
         );
         let stem = name.strip_suffix(".toml").unwrap();
-        let profile = launch_profile::parse(
+        let profile = launch_profile::parse_with(
             &text,
             stem,
             launch_profile::LaunchSource::Bundled,
             Some(b"/home/op"),
+            Some(b"/home/op/.config/ukai"),
         )
         .unwrap_or_else(|error| panic!("{name}: {error:?}"));
         assert_eq!(profile.jail, ProfileName::Agent, "{name}");
@@ -542,6 +543,15 @@ fn i02_the_bundled_profiles_are_valid_experimental_data_for_the_agent_jail() {
                 credential.source.as_bytes().starts_with(b"/home/op/"),
                 "{name}: sources are the node's own files beneath the operator home"
             );
+            // J12: a bundled vault credential the agent finds under its own
+            // name is bound to the resolved program, and says how to provide
+            // its source.
+            if let Some(vault) = &credential.vault
+                && vault.env.is_some()
+            {
+                assert_eq!(vault.binaries, ["@program"], "{name}: {}", credential.id);
+                assert!(profile.hints.contains_key(&credential.id), "{name}");
+            }
         }
         // §6.1 keeps credentials and allowed hosts off `tool`; the bundled
         // profiles ship their credential blocks commented out, so the

@@ -170,6 +170,13 @@ struct LaunchFile {
     #[serde(default)]
     credentials: BTreeMap<String, CredentialEntry>,
     network: Option<LaunchNetwork>,
+    // J12 (jail-launch-and-summary.md §3.4)
+    /// Levels above the canonical executable `--from-path` grants read-only.
+    #[serde(default)]
+    program_root: Option<i64>,
+    /// Stage the first listed credential whose source exists.
+    #[serde(default)]
+    credentials_one_of: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -206,6 +213,13 @@ struct CredentialEntry {
     #[serde(default)]
     refresh: Option<crate::vault::RefreshPolicy>,
     mode: String,
+    // J12 (§3.4)
+    /// The variable the vault placeholder is bound to.
+    #[serde(default)]
+    env: Option<String>,
+    /// How to provide this source, for `doctor` and the refusal.
+    #[serde(default)]
+    hint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -289,7 +303,28 @@ pub struct LaunchProfile {
     pub credentials: Vec<CredentialDecl>,
     /// Raw `network.allow` rules, parsed by the policy layer.
     pub network_allow: Vec<String>,
+    /// J12: how many levels above the canonical executable `--from-path`
+    /// grants read-only ([`PROGRAM_ROOT_DEFAULT`] unless the profile says).
+    pub program_root: u8,
+    /// J12: the credential ids of which only the first whose source exists
+    /// is staged, in the profile's order; empty when every credential is.
+    pub credentials_one_of: Vec<String>,
+    /// J12: each credential's `hint`, by id: operator-facing text, never
+    /// policy, so it is not in the snapshot.
+    pub hints: BTreeMap<String, String>,
 }
+
+/// J12: `program_root` when a launch profile does not say: the executable's
+/// own directory.
+pub const PROGRAM_ROOT_DEFAULT: u8 = 1;
+/// J12: the largest `program_root` (§3.4).
+pub const PROGRAM_ROOT_MAX: u8 = 4;
+/// J12: the longest `hint`, in bytes (§3.4).
+pub const HINT_MAX: usize = 512;
+/// J12: the prefix of a credential `source` resolved against the config
+/// directory (§3.4), so a moved `UKAI_CONFIG_DIR` and `ukai-jail credential
+/// set` agree.
+pub const CONFIG_PREFIX: &str = "@config/";
 
 impl LaunchProfile {
     /// Whether this profile needs a vendor-state directory (§7: "only when a
@@ -330,10 +365,33 @@ fn credential_source(
     raw: &str,
     base_dir: Option<&[u8]>,
     home: Option<&[u8]>,
+    config_dir: Option<&[u8]>,
     key: &str,
 ) -> Result<Vec<u8>, JailError> {
     use crate::policy::path::{self, Refusal};
-    let normalized = path::expand_home(raw.as_bytes(), home)
+    // J12: `@config/` names the config directory, normalized as `~/` is.
+    let expanded = match raw.strip_prefix(CONFIG_PREFIX) {
+        Some(rest) => {
+            let Some(config) = config_dir else {
+                return Err(invalid(
+                    key,
+                    "an `@config/` source needs the config directory, which is unavailable",
+                ));
+            };
+            if !config.starts_with(b"/") {
+                return Err(invalid(
+                    key,
+                    "an `@config/` source needs an absolute config directory",
+                ));
+            }
+            let mut joined = config.to_vec();
+            joined.push(b'/');
+            joined.extend_from_slice(rest.as_bytes());
+            Ok(joined)
+        }
+        None => path::expand_home(raw.as_bytes(), home),
+    };
+    let normalized = expanded
         .and_then(|expanded| path::normalize(base_dir, &expanded))
         .map_err(|refusal| {
             invalid(
@@ -417,6 +475,21 @@ pub fn parse(
     source: LaunchSource,
     home: Option<&[u8]>,
 ) -> Result<LaunchProfile, JailError> {
+    parse_with(text, expected_name, source, home, None)
+}
+
+/// [`parse`], with the config directory an `@config/` source resolves
+/// against (J12); without one, such a source refuses.
+///
+/// # Errors
+/// As [`parse`].
+pub fn parse_with(
+    text: &str,
+    expected_name: &str,
+    source: LaunchSource,
+    home: Option<&[u8]>,
+    config_dir: Option<&[u8]>,
+) -> Result<LaunchProfile, JailError> {
     let mut file = read_file(text)?;
     merge_fragments(&mut file)?;
     if file
@@ -452,7 +525,16 @@ pub fn parse(
     let base_dir = source
         .directory()
         .map(|directory| directory.as_os_str().as_bytes().to_vec());
-    let credentials = credentials(&file, &subdirs, base_dir.as_deref(), home)?;
+    let credentials = credentials(&file, &subdirs, base_dir.as_deref(), home, config_dir)?;
+    check_vault_env_names(
+        &credentials,
+        &environment,
+        state_var.as_deref(),
+        file.home_is_state,
+    )?;
+    let program_root = program_root(file.program_root)?;
+    let credentials_one_of = credentials_one_of(&file.credentials_one_of, &credentials)?;
+    let hints = hints(&file.credentials)?;
     Ok(LaunchProfile {
         name: file.name,
         source,
@@ -468,7 +550,103 @@ pub fn parse(
             .network
             .map(|network| network.allow)
             .unwrap_or_default(),
+        program_root,
+        credentials_one_of,
+        hints,
     })
+}
+
+/// J12: `program_root`, 1 to [`PROGRAM_ROOT_MAX`].
+fn program_root(raw: Option<i64>) -> Result<u8, JailError> {
+    match raw {
+        None => Ok(PROGRAM_ROOT_DEFAULT),
+        Some(levels) => u8::try_from(levels)
+            .ok()
+            .filter(|levels| (1..=PROGRAM_ROOT_MAX).contains(levels))
+            .ok_or_else(|| {
+                invalid(
+                    "launch.program_root",
+                    format!("`program_root = {levels}` is not between 1 and {PROGRAM_ROOT_MAX}"),
+                )
+            }),
+    }
+}
+
+/// J12: `credentials_one_of`: declared ids, each once.
+fn credentials_one_of(
+    ids: &[String],
+    credentials: &[CredentialDecl],
+) -> Result<Vec<String>, JailError> {
+    let key = "launch.credentials_one_of";
+    let mut seen = BTreeSet::new();
+    for id in ids {
+        if !credentials.iter().any(|credential| &credential.id == id) {
+            return Err(invalid(key, format!("`{id}` is not a declared credential")));
+        }
+        if !seen.insert(id.as_str()) {
+            return Err(invalid(key, format!("`{id}` is listed twice")));
+        }
+    }
+    Ok(ids.to_vec())
+}
+
+/// J12: each credential's `hint`: printable ASCII, at most [`HINT_MAX`]
+/// bytes, so it can reach a terminal unescaped.
+fn hints(
+    entries: &BTreeMap<String, CredentialEntry>,
+) -> Result<BTreeMap<String, String>, JailError> {
+    let mut hints = BTreeMap::new();
+    for (id, entry) in entries {
+        let Some(hint) = &entry.hint else { continue };
+        if hint.is_empty()
+            || hint.len() > HINT_MAX
+            || !hint.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+        {
+            return Err(invalid(
+                format!("launch.credentials.{id}.hint"),
+                format!("a hint is 1 to {HINT_MAX} printable ASCII bytes"),
+            ));
+        }
+        hints.insert(id.clone(), hint.clone());
+    }
+    Ok(hints)
+}
+
+/// J12: a vault `env` name binds the placeholder in place of
+/// `UKAI_VAULT_<ID>`, so it must be unique across the environment
+/// bindings, the state variable, `HOME` when it is the state, and every
+/// other credential's `env` (§3.4). The name itself was checked like every
+/// launch-profile name.
+fn check_vault_env_names(
+    credentials: &[CredentialDecl],
+    environment: &[EnvBinding],
+    state_var: Option<&str>,
+    home_is_state: bool,
+) -> Result<(), JailError> {
+    let mut taken: BTreeSet<String> = environment
+        .iter()
+        .map(|binding| binding.name.clone())
+        .collect();
+    taken.extend(state_var.map(str::to_owned));
+    if home_is_state {
+        taken.insert(HOME_NAME.to_owned());
+    }
+    for credential in credentials {
+        let Some(name) = credential
+            .vault
+            .as_ref()
+            .and_then(|vault| vault.env.as_ref())
+        else {
+            continue;
+        };
+        if !taken.insert(name.clone()) {
+            return Err(invalid(
+                format!("launch.credentials.{}.env", credential.id),
+                format!("`{name}` is already bound"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The file's grammar, and no narrowing key in it.
@@ -665,6 +843,7 @@ fn credentials(
     subdirs: &[StateSubdir],
     base_dir: Option<&[u8]>,
     home: Option<&[u8]>,
+    config_dir: Option<&[u8]>,
 ) -> Result<Vec<CredentialDecl>, JailError> {
     let mut credentials: Vec<CredentialDecl> = Vec::new();
     let mut destinations: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
@@ -681,11 +860,23 @@ fn credentials(
             ));
         };
         let vault = if mode == CredentialMode::Vault {
-            if !vault_names.insert(crate::vault::env_name(id)) {
+            if entry.env.is_none() && !vault_names.insert(crate::vault::env_name(id)) {
                 return Err(invalid(
                     &key,
                     "vault ids collide as environment variable names",
                 ));
+            }
+            if let Some(name) = &entry.env {
+                check_env_name(name, &format!("{key}.env"))?;
+                if crate::vault::CA_TRUST_NAMES
+                    .iter()
+                    .any(|trust| trust.eq_ignore_ascii_case(name))
+                {
+                    return Err(invalid(
+                        format!("{key}.env"),
+                        format!("`{name}` is a CA trust variable the vault sets"),
+                    ));
+                }
             }
             Some(vault_policy(entry, &key)?)
         } else {
@@ -695,10 +886,12 @@ fn credentials(
                 || !entry.paths.is_empty()
                 || !entry.binaries.is_empty()
                 || entry.refresh.is_some()
+                || entry.env.is_some()
             {
                 return Err(invalid(
                     &key,
-                    "hosts, allow_plaintext, header, paths, binaries and refresh require vault mode",
+                    "hosts, allow_plaintext, header, paths, binaries, refresh and env require \
+                     vault mode",
                 ));
             }
             None
@@ -730,7 +923,7 @@ fn credentials(
         destinations.push((id.clone(), dest));
 
         let source_key = format!("{key}.source");
-        let source = credential_source(&entry.source, base_dir, home, &source_key)?;
+        let source = credential_source(&entry.source, base_dir, home, config_dir, &source_key)?;
         credentials.push(CredentialDecl {
             id: id.clone(),
             source: native(source, &source_key)?,
@@ -753,6 +946,7 @@ fn vault_policy(entry: &CredentialEntry, key: &str) -> Result<crate::vault::Poli
         paths: entry.paths.clone(),
         binaries: entry.binaries.clone(),
         refresh: entry.refresh.clone(),
+        env: entry.env.clone(),
         allow_plaintext: entry.allow_plaintext,
         header: entry.header.as_ref().map(|header| crate::vault::Header {
             name: header
@@ -810,11 +1004,12 @@ pub fn load(
     match operator_path.symlink_metadata() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if let Some(text) = bundled_profile(name) {
-                return parse(
+                return parse_with(
                     text,
                     name,
                     LaunchSource::Bundled,
                     home.map(|h| h.as_os_str().as_bytes()),
+                    Some(config_dir.as_os_str().as_bytes()),
                 );
             }
         }
@@ -934,7 +1129,7 @@ pub fn load(
         .map_err(|_| unsafe_launch(format!("{} is not UTF-8", file_path.display())))?;
     chain.push(opened.identity());
 
-    parse(
+    parse_with(
         &text,
         name,
         LaunchSource::OperatorFile {
@@ -942,6 +1137,7 @@ pub fn load(
             chain,
         },
         home.map(|home| home.as_os_str().as_bytes()),
+        Some(config_dir.as_os_str().as_bytes()),
     )
 }
 
@@ -1195,6 +1391,19 @@ pub fn check_outside_writable(launch: &LaunchProfile, roots: &[PathBuf]) -> Resu
         )));
     }
     Ok(())
+}
+
+/// J12: whether `ukai-jail NAME` names a launch profile: an operator file
+/// `<config-dir>/launch/<name>.toml` (any object there; loading judges it),
+/// or a bundled one. Invalid names name none.
+#[must_use]
+pub fn exists(config_dir: &Path, name: &str) -> bool {
+    valid_name(name)
+        && (launch_directory(config_dir)
+            .join(format!("{name}.toml"))
+            .symlink_metadata()
+            .is_ok()
+            || bundled_profile(name).is_some())
 }
 
 #[path = "../profiles/embedded.rs"]
@@ -1707,8 +1916,14 @@ allow = ["api.example.com:443"]
             let path = entry.expect("an entry").path();
             let stem = path.file_stem().and_then(OsStr::to_str).expect("a name");
             let text = std::fs::read_to_string(&path).expect("readable");
-            let profile =
-                parse(&text, stem, LaunchSource::Bundled, Some(b"/home/op")).expect("parses");
+            let profile = parse_with(
+                &text,
+                stem,
+                LaunchSource::Bundled,
+                Some(b"/home/op"),
+                Some(b"/home/op/.config/ukai"),
+            )
+            .expect("parses");
             for rule in &profile.network_allow {
                 let parsed = crate::network::HostRule::parse(rule).expect("a host rule");
                 assert!(!parsed.explicit_port, "{stem}: `{rule}` names a port");
@@ -1716,6 +1931,170 @@ allow = ["api.example.com:443"]
             }
         }
         assert!(checked > 0, "no bundled profile allows a host");
+    }
+
+    /// J12 (K41, §3.4): a vault `env` binds the placeholder under the
+    /// agent's own name; reserved, generated and colliding names refuse at
+    /// load, and `env` belongs to vault credentials only.
+    #[test]
+    fn vault_env_names_are_checked_like_every_launch_name() {
+        let profile = |env: &str, extra: &str| {
+            format!(
+                "name=\"demo\"\njail=\"agent\"\nstate_var=\"STATE_DIR\"\n{extra}\n\
+                 [credentials.api]\nsource=\"/private/token\"\nmode=\"vault\"\n\
+                 hosts=[\"https://api.example.com\"]\nenv=\"{env}\"\n"
+            )
+        };
+        let parsed = parse_ok(&profile("AGENT_TOKEN", ""));
+        assert_eq!(
+            parsed.credentials[0].vault.as_ref().unwrap().env.as_deref(),
+            Some("AGENT_TOKEN")
+        );
+        for name in [
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "UKAI_VAULT_API",
+            "https_proxy",
+            "PATH",
+            "TMPDIR",
+            "HOME",
+            "LANG",
+            "GLIBC_TUNABLES",
+            "SSL_CERT_FILE",
+            "node_extra_ca_certs",
+            "1BAD",
+            "A-B",
+        ] {
+            let error = parse_err(&profile(name, ""));
+            assert_eq!(error.code, ErrorCode::InvalidConfig, "{name}");
+            assert_eq!(
+                error.key_path.as_deref(),
+                Some("launch.credentials.api.env"),
+                "{name}: {}",
+                error.message
+            );
+        }
+        // Unique across the environment, the state variable, HOME when it
+        // is the state, and every other credential's `env`.
+        for (env, extra) in [
+            ("STATE_DIR", ""),
+            ("AGENT_HOME", "[environment]\nAGENT_HOME=\"x\""),
+        ] {
+            let error = parse_err(&profile(env, extra));
+            assert!(
+                error.message.contains("already bound"),
+                "{env}: {}",
+                error.message
+            );
+        }
+        let twice = format!(
+            "{}[credentials.other]\nsource=\"/private/other\"\nmode=\"vault\"\n\
+             hosts=[\"https://api.example.com\"]\nenv=\"AGENT_TOKEN\"\n",
+            profile("AGENT_TOKEN", "")
+        );
+        assert!(parse_err(&twice).message.contains("already bound"));
+        let copy = "name=\"demo\"\njail=\"agent\"\n[credentials.api]\nsource=\"/private/t\"\n\
+                    mode=\"copy_rw\"\ndest=\"t\"\nenv=\"AGENT_TOKEN\"\n";
+        assert!(parse_err(copy).message.contains("require vault mode"));
+    }
+
+    /// J12 (§3.4): `program_root`, `hint`, `credentials_one_of`,
+    /// `binaries = ["@program"]` and `@config/` sources.
+    #[test]
+    fn the_launch_keys_validate_at_load() {
+        let base = "name=\"demo\"\njail=\"agent\"\n";
+        assert_eq!(parse_ok(base).program_root, PROGRAM_ROOT_DEFAULT);
+        assert_eq!(parse_ok(&format!("{base}program_root=4\n")).program_root, 4);
+        for bad in ["0", "5", "-1", "256"] {
+            let error = parse_err(&format!("{base}program_root={bad}\n"));
+            assert_eq!(
+                error.key_path.as_deref(),
+                Some("launch.program_root"),
+                "{bad}"
+            );
+        }
+        let vault = |id: &str, source: &str, extra: &str| {
+            format!(
+                "[credentials.{id}]\nsource=\"{source}\"\nmode=\"vault\"\n\
+                 hosts=[\"https://api.example.com\"]\nbinaries=[\"@program\"]\n{extra}\n"
+            )
+        };
+        let text = format!(
+            "{base}credentials_one_of=[\"b\",\"a\"]\n{}{}",
+            vault("a", "@config/credentials/a", "hint=\"set a\""),
+            vault("b", "@config/credentials/b", "")
+        );
+        let parsed = parse_with(
+            &text,
+            "demo",
+            operator_file(),
+            Some(b"/home/op"),
+            Some(b"/home/op/.config/ukai"),
+        )
+        .unwrap();
+        assert_eq!(parsed.credentials_one_of, ["b", "a"]);
+        assert_eq!(parsed.hints.get("a").map(String::as_str), Some("set a"));
+        assert!(!parsed.hints.contains_key("b"));
+        let sources: Vec<&[u8]> = parsed
+            .credentials
+            .iter()
+            .map(|c| c.source.as_bytes())
+            .collect();
+        assert!(
+            sources.contains(&&b"/home/op/.config/ukai/credentials/a"[..]),
+            "{sources:?}"
+        );
+        assert_eq!(
+            parsed.credentials[0].vault.as_ref().unwrap().binaries,
+            [crate::vault::PROGRAM_TOKEN]
+        );
+        // Without a config directory an `@config/` source refuses.
+        let error = parse_err(&text);
+        assert!(
+            error.message.contains("config directory"),
+            "{}",
+            error.message
+        );
+        // `credentials_one_of` names declared ids, each once.
+        for one_of in ["[\"c\"]", "[\"a\",\"a\"]"] {
+            let text = format!(
+                "{base}credentials_one_of={one_of}\n{}",
+                vault("a", "/private/a", "")
+            );
+            let error = parse_err(&text);
+            assert_eq!(
+                error.key_path.as_deref(),
+                Some("launch.credentials_one_of"),
+                "{one_of}: {}",
+                error.message
+            );
+        }
+        // A hint is printable ASCII, at most 512 bytes.
+        for hint in ["", "tab\\there", &"x".repeat(HINT_MAX + 1)] {
+            let text = format!(
+                "{base}{}",
+                vault("a", "/private/a", &format!("hint=\"{hint}\""))
+            );
+            let error = parse_err(&text);
+            assert_eq!(
+                error.key_path.as_deref(),
+                Some("launch.credentials.a.hint"),
+                "{hint:?}: {}",
+                error.message
+            );
+        }
+        // `@program` is a vault binding only.
+        let copy = format!(
+            "{base}[credentials.a]\nsource=\"/private/a\"\nmode=\"copy_rw\"\ndest=\"a\"\n\
+             binaries=[\"@program\"]\n"
+        );
+        assert!(parse_err(&copy).message.contains("require vault mode"));
+        // A binding that is neither absolute nor `@program` refuses.
+        let relative = format!(
+            "{base}{}",
+            vault("a", "/private/a", "").replace("@program", "program")
+        );
+        assert!(parse_err(&relative).message.contains("`@program`"));
     }
 
     #[test]

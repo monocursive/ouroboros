@@ -358,6 +358,21 @@ fn the_bundled_launch_profiles_are_the_frozen_ones() {
             list(entry.get("network_allow")),
             "{file} network.allow: {REGENERATE}"
         );
+        // J12: the install-root level `--from-path` grants, and the
+        // credential alternatives.
+        assert_eq!(
+            profile
+                .get("program_root")
+                .and_then(toml::Value::as_integer)
+                .unwrap_or(1),
+            entry["program_root"].as_integer().expect("an integer"),
+            "{file} program_root: {REGENERATE}"
+        );
+        assert_eq!(
+            list(profile.get("credentials_one_of")),
+            list(entry.get("credentials_one_of")),
+            "{file} credentials_one_of: {REGENERATE}"
+        );
         // Review F3: the environment it sets in the sandbox.
         let environment = profile
             .get("environment")

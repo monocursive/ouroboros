@@ -26,6 +26,9 @@ pub struct User {
     pub name: Vec<u8>,
     /// Its primary group.
     pub primary_gid: u32,
+    /// Its home directory, as the database records it (J12: the home a
+    /// workspace may not be, whatever `HOME` says).
+    pub home: Option<Vec<u8>>,
 }
 
 /// A group of the group database.
@@ -87,9 +90,15 @@ pub fn user(uid: u32) -> io::Result<Option<User>> {
         // SAFETY: getpwuid_r succeeded, so pw_name points at a
         // NUL-terminated string inside `buffer`, which is still alive.
         let name = unsafe { CStr::from_ptr(entry.pw_name) }.to_bytes().to_vec();
+        let home = (!entry.pw_dir.is_null())
+            // SAFETY: getpwuid_r succeeded, so a non-null pw_dir points at a
+            // NUL-terminated string inside `buffer`, which is still alive.
+            .then(|| unsafe { CStr::from_ptr(entry.pw_dir) }.to_bytes().to_vec())
+            .filter(|home| !home.is_empty());
         Ok(Some(User {
             name,
             primary_gid: entry.pw_gid,
+            home,
         }))
     })
 }

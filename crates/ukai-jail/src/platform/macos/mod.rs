@@ -145,6 +145,7 @@ mod tests {
                 config_dir: std::path::PathBuf::from("/nonexistent"),
                 launch: None,
                 proxy: None,
+                pinned_roots: Vec::new(),
             },
             Sinks { trace: None },
         );

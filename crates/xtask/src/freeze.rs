@@ -449,6 +449,19 @@ fn launch_profile_sections(w: &mut String, root: &Path) -> Result<(), String> {
             &format!("{file}: network.allow"),
         )?;
         let _ = writeln!(w, "network_allow = {}", quote_list(&allow));
+        // J12: how far up from the resolved program `--from-path` grants
+        // read-only (a wider root mounts more), and which credentials are
+        // alternatives (only the first present is staged).
+        let program_root = profile
+            .get("program_root")
+            .and_then(toml::Value::as_integer)
+            .unwrap_or(1);
+        let _ = writeln!(w, "program_root = {program_root}");
+        let one_of = strings(
+            profile.get("credentials_one_of"),
+            &format!("{file}: credentials_one_of"),
+        )?;
+        let _ = writeln!(w, "credentials_one_of = {}", quote_list(&one_of));
         // The environment it sets in the sandbox (review F3: a preload or a
         // host path here broadens what the child reaches).
         let environment = profile

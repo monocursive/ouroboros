@@ -342,6 +342,9 @@ pub(crate) fn plan_for(
     };
     bplan.bwrap = paths.bwrap.to_path_buf();
     bplan.env = environment_for(snapshot, paths.workspace)?;
+    // J12 §3.2 step 4
+    bplan.cwd = (!snapshot.roots.cwd.as_bytes().is_empty())
+        .then(|| join_native(paths.workspace, &snapshot.roots.cwd));
     // §10 — the proxy socket in its registered directory, bound read-only
     // by descriptor, and the proxy variables.
     if snapshot.profile == ProfileName::Agent {
@@ -559,6 +562,10 @@ pub(super) enum Placement {
     /// host's file; the row itself is the runtime one, so the mount table
     /// is the same shape with or without a sanitized copy.
     Resolver,
+    /// J12: the source of a read-only grant row the snapshot already has
+    /// (an install root `--from-path` pinned): the row binds this object,
+    /// and no row is added.
+    Grant,
 }
 
 impl PinnedBind {
@@ -626,8 +633,31 @@ impl PinnedBind {
         match &self.placement {
             Placement::Bind(destination) => destination,
             Placement::Resolver => Path::new(RESOLV_CONF),
+            Placement::Grant => self.pin.path(),
         }
     }
+
+    /// J12: a pin of an install root `--from-path` resolved, adopted from
+    /// the handle resolution held, so the read-only grant of `path` binds
+    /// the directory the executable was pinned in.
+    ///
+    /// # Errors
+    /// The errno from duplicating or inspecting the handle.
+    pub(super) fn grant(root: &crate::platform::PinnedRoot) -> std::io::Result<PinnedBind> {
+        Ok(PinnedBind {
+            pin: jfs::PinnedPath::adopt(root.handle.try_clone()?, &root.path)?,
+            placement: Placement::Grant,
+        })
+    }
+}
+
+/// `base` joined with a snapshot's native workspace-relative suffix; `base`
+/// itself for the empty one (J12's `roots.cwd`).
+pub(super) fn join_native(base: &Path, suffix: &crate::records::NativeString) -> PathBuf {
+    if suffix.as_bytes().is_empty() {
+        return base.to_path_buf();
+    }
+    base.join(OsStr::from_bytes(suffix.as_bytes()))
 }
 
 pub(super) type MountPreparation = (
@@ -961,6 +991,7 @@ pub(super) fn prepare_mounts(
         match bind.placement {
             Placement::Bind(destination) => plan.extra_ro_binds.push((source.clone(), destination)),
             Placement::Resolver => plan.resolv_source = Some(source.clone()),
+            Placement::Grant => {}
         }
         pins.insert(source, bind.pin);
     }

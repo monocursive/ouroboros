@@ -29,7 +29,25 @@ pub struct Policy {
     /// Optional supervisor-owned OAuth2 refresh; source becomes a token document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<RefreshPolicy>,
+    /// J12: the variable the placeholder is bound to in the child, in place
+    /// of [`env_name`]'s `UKAI_VAULT_<ID>`, so the agent finds it under its
+    /// own name (launch-profile `env`). The launch-profile loader validates
+    /// the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
 }
+
+/// The trust variables an attempt with a vault points at its per-attempt CA
+/// (the Linux boundary sets them, replacing any other binding), so a vault
+/// `env` may not name one: its placeholder would never arrive.
+pub const CA_TRUST_NAMES: [&str; 3] =
+    ["SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE"];
+
+/// J12: the `binaries` entry that stands for the program `--from-path`
+/// resolved (or an absolute `PROGRAM` without it). Resolution replaces it
+/// with that program's canonical path before anything is staged; a vault
+/// never pins it.
+pub const PROGRAM_TOKEN: &str = "@program";
 
 /// A declared placement for a vault placeholder: the header name and the
 /// credential prefix (`Bearer `) that must precede it. The secret never
@@ -65,8 +83,13 @@ impl Policy {
             validate_path(path)?;
         }
         for binary in &self.binaries {
+            if binary == PROGRAM_TOKEN {
+                continue;
+            }
             if !binary.starts_with('/') || binary.contains('\0') || binary.len() > 4096 {
-                return Err("vault binaries must be absolute executable paths".into());
+                return Err(
+                    "vault binaries must be absolute executable paths or `@program`".into(),
+                );
             }
         }
         if let Some(refresh) = &self.refresh {
@@ -141,12 +164,20 @@ pub(crate) fn valid_value(value: &[u8]) -> bool {
     !value.is_empty() && value.len() <= VALUE_MAX && value.iter().all(|b| matches!(b, 0x20..=0x7e))
 }
 
-/// Pins every executable the policy binds its credential to.
+/// Pins every executable the policy binds its credential to. An
+/// unsubstituted [`PROGRAM_TOKEN`] refuses: it names no file.
 fn executables(policy: &Policy) -> Result<Vec<origin::Executable>, String> {
     policy
         .binaries
         .iter()
-        .map(|path| origin::Executable::pin(path))
+        .map(|path| {
+            if path == PROGRAM_TOKEN {
+                return Err(
+                    "vault binaries name `@program`, which no resolved program replaced".into(),
+                );
+            }
+            origin::Executable::pin(path)
+        })
         .collect()
 }
 
@@ -174,6 +205,24 @@ impl std::fmt::Debug for Secret {
     }
 }
 impl Secret {
+    /// The variable the child finds this secret's placeholder in: the
+    /// policy's `env`, or `UKAI_VAULT_<ID>`.
+    pub(crate) fn env_name(&self) -> String {
+        self.policy
+            .env
+            .clone()
+            .unwrap_or_else(|| env_name(&self.id))
+    }
+
+    /// The `(dev, ino)` of every executable this secret is bound to, as
+    /// pinned when it was staged.
+    pub(crate) fn executable_identities(&self) -> Vec<(u64, u64)> {
+        self.executables
+            .iter()
+            .map(origin::Executable::identity)
+            .collect()
+    }
+
     /// A secret whose value is fixed for the attempt, for tests: staging
     /// always reads a live source ([`Secret::from_source`]).
     #[cfg(test)]
@@ -296,7 +345,7 @@ impl Vault {
     pub fn environment(&self) -> Vec<(String, String)> {
         self.secrets
             .iter()
-            .map(|s| (env_name(&s.id), self.placeholder(s)))
+            .map(|s| (s.env_name(), self.placeholder(s)))
             .collect()
     }
     fn placeholder(&self, secret: &Secret) -> String {

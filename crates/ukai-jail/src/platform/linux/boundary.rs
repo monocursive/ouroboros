@@ -1009,9 +1009,25 @@ impl Planned {
 
         // Until the boundary owns them, every refusal drops `placeholders`,
         // which removes the directories it made in the operator's workspace.
+        // J12: the install roots `--from-path` pinned, bound by those handles.
+        let roots = plan
+            .pinned_roots
+            .iter()
+            .map(PinnedBind::grant)
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|error| {
+                preparing(
+                    ErrorCode::BackendUnavailable,
+                    format!("a pinned install root cannot be held: {error}"),
+                )
+            })?;
         let (scan, pins, pinned_fds, placeholders) = prepare_mounts(
             &mut bplan,
-            vault_ca.into_iter().chain([resolver]).collect(),
+            vault_ca
+                .into_iter()
+                .chain([resolver])
+                .chain(roots)
+                .collect(),
             &plan.attempt_dir,
             &name_refs,
             snapshot.filesystem.protected_coverage,
@@ -1321,7 +1337,7 @@ fn stage_vault(
     for (name, value) in vault.environment() {
         bplan.env.push((name.into(), value.into()));
     }
-    for name in ["SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE"] {
+    for name in crate::vault::CA_TRUST_NAMES {
         bplan.env.retain(|(key, _)| key != name);
         bplan
             .env

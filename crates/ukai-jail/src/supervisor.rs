@@ -55,6 +55,7 @@ use crate::trace::{self, FdSink, FileSink, Priority, SharedTrace, TraceSink};
 
 mod amend;
 mod attempt;
+pub mod from_path;
 
 use attempt::{Attempt, first_record};
 
@@ -129,6 +130,9 @@ pub struct ExplainReport {
     pub resolved: Resolved,
     /// The platform identity.
     pub platform: PlatformRecord,
+    /// J12: the program `--from-path` resolved, and what became of each of
+    /// its install roots.
+    pub program: Option<(crate::program::Program, Vec<from_path::DerivedRoot>)>,
 }
 
 /// What `doctor` measured.
@@ -165,6 +169,20 @@ pub struct LaunchReadiness {
     pub support_reason: &'static str,
     /// One check per declared credential, in id order.
     pub credentials: Vec<crate::credentials::CredentialCheck>,
+    /// J12: each credential's `hint`, by id, printed for the unavailable
+    /// ones (text only: the doctor record carries names and statuses).
+    pub hints: std::collections::BTreeMap<String, String>,
+    /// J12: the profile's `credentials_one_of`: of these, one available is
+    /// enough.
+    pub one_of: Vec<String>,
+    /// J12: the profile's name is a built-in verb, so `ukai-jail NAME` runs
+    /// the verb; only `run --launch NAME` reaches the profile.
+    pub shadowed_by_verb: bool,
+    /// J12: the program `--from-path` resolved, with its install roots.
+    pub program: Option<(crate::program::Program, Vec<from_path::DerivedRoot>)>,
+    /// J12 §3.2: the workspace's `.git` is a file (a linked worktree or a
+    /// submodule), whose common git directory the agent cannot see.
+    pub worktree: Option<String>,
 }
 
 /// Every launch profile is `experimental` until a real run of that agent is
@@ -191,6 +209,10 @@ pub struct Plan {
     /// J13: `[jail] summary = false` in the operator's `config.toml`.
     /// Presentation only: it is not part of the snapshot or its digest.
     pub quiet: bool,
+    /// J12: the program `--from-path` resolved and pinned; its argv prefix
+    /// replaces `PROGRAM`, its install roots are bound by the handles held
+    /// here, and it is rechecked before release.
+    pub program: Option<crate::program::Program>,
 }
 
 impl Plan {
@@ -227,7 +249,37 @@ fn os_bytes(path: &Path) -> Vec<u8> {
 /// [`ErrorCode::PolicyWidening`] with the exact key path for a narrowing file
 /// that adds authority.
 pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError> {
-    resolve(ctx, args, false)
+    resolve(ctx, args, Purpose::INSPECT)
+}
+
+/// What a resolution is for: it changes which J12 checks apply.
+#[derive(Clone, Copy, Debug)]
+struct Purpose<'a> {
+    /// `learn`: the observer also records read-only opens.
+    learning: bool,
+    /// The plan will run (`run`, `learn`): the home-workspace refusal
+    /// applies to every contained profile, and `@program` needs a program.
+    executing: bool,
+    /// `credentials_one_of` picks the credential to stage (`run`, `learn`,
+    /// `explain`); `doctor` inspects every declared one instead.
+    select_credentials: bool,
+    /// `PROGRAM`, which `@program` binds to without `--from-path`.
+    argv0: Option<&'a [u8]>,
+}
+
+impl Purpose<'_> {
+    /// `explain`, and the public [`resolve_plan`].
+    const INSPECT: Purpose<'static> = Purpose {
+        learning: false,
+        executing: false,
+        select_credentials: true,
+        argv0: None,
+    };
+    /// `doctor`.
+    const DOCTOR: Purpose<'static> = Purpose {
+        select_credentials: false,
+        ..Purpose::INSPECT
+    };
 }
 
 /// [`resolve_plan`] for `learn`: the same policy, with the observer also
@@ -238,10 +290,34 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
 /// As [`resolve_plan`], and [`ErrorCode::InvalidConfig`] at key `learn`
 /// where learning cannot run.
 pub fn resolve_learning_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError> {
-    resolve(ctx, args, true)
+    resolve(
+        ctx,
+        args,
+        Purpose {
+            learning: true,
+            executing: true,
+            select_credentials: true,
+            argv0: None,
+        },
+    )
 }
 
-fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, JailError> {
+fn resolve(ctx: &Context, args: &PolicyArgs, purpose: Purpose<'_>) -> Result<Plan, JailError> {
+    let from_path = args.selection.from_path;
+    // J12 §3.1: `--from-path` resolves a launch name, and derives argv and
+    // grants, which the uncontained profile has nothing to bound.
+    if from_path {
+        if args.selection.launch.is_none() {
+            return Err(usage("--from-path", "--from-path needs --launch NAME"));
+        }
+        if args.selection.profile.as_deref() == Some("none") {
+            return Err(usage(
+                "--from-path",
+                "--from-path refuses --profile none: the uncontained profile grants nothing \
+                 for it to derive",
+            ));
+        }
+    }
     let config_dir = state::config_dir(&ctx.env_settings, ctx.home.as_deref())?;
     let data_dir = state::data_dir(&ctx.env_settings, ctx.home.as_deref())?;
     // Audit 6 F1: a `--profile none` child sees the whole host, so every
@@ -250,8 +326,14 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
     // is live. The markers sit in both directories, which are chosen
     // independently: a run sharing either sees them.
     let epoch = state::uncontained_epoch(&[&data_dir, &config_dir])?;
-    let launch = read_launch_profile(ctx, args, &config_dir, &epoch)?;
-    let workspace = canonical_root(&ctx.cwd, args.selection.workspace.as_deref(), "--workspace")?;
+    let mut launch = read_launch_profile(ctx, args, &config_dir, &epoch)?;
+    // J12 §3.2: with `--from-path` and no `--workspace`, the repository top
+    // level; outside a repository, a refusal, never a guess.
+    let workspace = if from_path && args.selection.workspace.is_none() {
+        from_path::discover_workspace(&ctx.cwd)?
+    } else {
+        canonical_root(&ctx.cwd, args.selection.workspace.as_deref(), "--workspace")?
+    };
     if !workspace.is_dir() {
         return Err(usage(
             "--workspace",
@@ -268,6 +350,21 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
     if let Some(launch) = &launch {
         check_launch_base(args, &operator_jail, profile, launch)?;
     }
+    // J12 §3.2 step 3 (decision 2): on every contained run, and wherever
+    // `--from-path` discovered the workspace.
+    if profile.is_contained() && (purpose.executing || from_path) {
+        from_path::refuse_home_workspace(ctx, &workspace)?;
+    }
+    // J12 §3.3: the program, found on the supervisor's own `PATH` (read
+    // here and never handed to the child) and pinned.
+    let program = match (&launch, from_path) {
+        (Some(launch), true) => Some(crate::program::resolve(
+            &launch.name,
+            (ctx.env_lookup)("PATH").as_deref(),
+            launch.program_root,
+        )?),
+        _ => None,
+    };
     let mut layers: Vec<Layer> = base.layer.into_iter().collect();
     // The operator's own `[jail]` table is a trusted layer: it may grant.
     if operator.jail.is_some() {
@@ -280,6 +377,9 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
     layers.extend(environment_layer(&ctx.env_settings));
     // 4. Explicit CLI grants and limits.
     layers.extend(command_line_layer(ctx, args)?);
+    // J12: the derived install roots, an operator layer the project file
+    // still narrows.
+    layers.extend(program.as_ref().map(from_path::program_layer));
     // 5. The workspace-root `ukai.toml`, which may only narrow.
     layers.extend(project_layer(&workspace)?);
 
@@ -299,15 +399,52 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
         layers,
     };
     let mut resolved = policy::resolve(&inputs)?;
+    // J12: every credential source the profile declares, before
+    // `credentials_one_of` drops any, for the install-root refusals.
+    let sources: Vec<PathBuf> = launch
+        .iter()
+        .flat_map(|launch| &launch.credentials)
+        .map(|credential| PathBuf::from(OsString::from_vec(credential.source.as_bytes().to_vec())))
+        .collect();
+    let mut skipped = Vec::new();
+    if let Some(launch) = &mut launch {
+        if purpose.select_credentials {
+            skipped = from_path::select_credentials(launch)?;
+        }
+        from_path::bind_program_token(launch, program.as_ref(), purpose.argv0, purpose.executing)?;
+    }
     // The launch environment, vendor state and `launch` field group, then
     // the digest and requirements over the result.
     if let Some(launch) = &launch {
         resolved = launch_profile::apply(resolved, launch)?;
     }
+    if !skipped.is_empty() {
+        resolved.amend(skipped, |_| Ok(()))?;
+    }
+    // J12 §3.2 step 4: the child starts where the operator stood, when that
+    // is beneath the workspace; the snapshot records it, so it is in the
+    // digest.
+    if let Some(cwd) = from_path::child_cwd(&ctx.cwd, &workspace) {
+        let detail = cwd.to_display();
+        resolved.amend(
+            vec![policy::ProvenanceEntry {
+                origin: "invocation-directory".to_owned(),
+                key: "roots.cwd".to_owned(),
+                detail: Some(detail),
+            }],
+            |snapshot| {
+                snapshot.roots.cwd = cwd;
+                Ok(())
+            },
+        )?;
+    }
+    if let Some(program) = &program {
+        resolved.amend(from_path::program_provenance(program), |_| Ok(()))?;
+    }
     if !operator_jail.commands.is_empty() {
         apply_command_rules(&mut resolved, &operator_jail.commands, profile)?;
     }
-    if learning {
+    if purpose.learning {
         enable_learning(&mut resolved, profile)?;
     }
     // §6.4: `build` requires an explicit memory ceiling; the baseline leaves it
@@ -321,6 +458,19 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
     if let Some(launch) = &launch {
         check_launch_placement(&resolved, &workspace, launch)?;
     }
+    if let Some(program) = &program {
+        from_path::check_program_placement(
+            program,
+            &from_path::Placement {
+                resolved: &resolved,
+                workspace: &workspace,
+                config_dir: &config_dir,
+                data_dir: &data_dir,
+                sources,
+                homes: from_path::operator_homes(ctx),
+            },
+        )?;
+    }
 
     let plan = Plan {
         resolved,
@@ -328,6 +478,7 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
         config_dir,
         data_dir,
         quiet: operator_jail.summary == Some(false),
+        program,
     };
     check_record_bounds(ctx, &plan)?;
     Ok(plan)
@@ -1315,9 +1466,14 @@ fn read_project_file(path: &Path) -> Result<Option<String>, JailError> {
 /// Returns the resolution errors of [`resolve_plan`].
 pub fn explain(ctx: &Context, args: &ExplainArgs) -> Result<ExplainReport, JailError> {
     let plan = resolve_plan(ctx, &args.policy)?;
+    let program = plan.program.map(|program| {
+        let roots = from_path::derived_roots(&program, &plan.resolved);
+        (program, roots)
+    });
     Ok(ExplainReport {
         resolved: plan.resolved,
         platform: platform_record(ctx),
+        program,
     })
 }
 
@@ -1329,7 +1485,7 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
     // §6.1's grammar carries the selection flags; the workspace and scratch
     // roots are the same ones `run` accepts, so a doctor call can name the
     // plan it is checking instead of inheriting the invocation directory.
-    let plan = resolve_plan(ctx, &args.policy())?;
+    let plan = resolve(ctx, &args.policy(), Purpose::DOCTOR)?;
     let request = plan_request(&plan);
     let capabilities = ctx.platform.probe_all(&request);
     let ready = plan
@@ -1343,7 +1499,36 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
     let launch = match &args.selection.launch {
         Some(name) => {
             let forbidden = forbidden_identities(&plan.resolved, &plan.workspace)?;
+            let profile = read_launch_profile(
+                ctx,
+                &args.policy(),
+                &plan.config_dir,
+                &state::uncontained_epoch(&[&plan.data_dir, &plan.config_dir])?,
+            )?;
+            let (hints, one_of) = profile
+                .map(|profile| (profile.hints, profile.credentials_one_of))
+                .unwrap_or_default();
             Some(LaunchReadiness {
+                hints,
+                one_of,
+                shadowed_by_verb: crate::cli::VERBS.contains(&name.as_str()),
+                worktree: plan
+                    .workspace
+                    .join(".git")
+                    .symlink_metadata()
+                    .is_ok_and(|metadata| metadata.is_file())
+                    .then(|| {
+                        "git_directory_outside: .git is a file (a linked worktree or a \
+                         submodule); the common git directory is not granted, so git \
+                         commands inside fail"
+                            .to_owned()
+                    }),
+                program: plan.program.as_ref().map(|program| {
+                    (
+                        program.clone(),
+                        from_path::derived_roots(program, &plan.resolved),
+                    )
+                }),
                 resolution: plan
                     .resolved
                     .provenance
@@ -1365,10 +1550,24 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
         }
         None => None,
     };
+    // J12: of the `credentials_one_of` ids, one available is enough; every
+    // other credential must be.
     let ready = ready
-        && launch
-            .as_ref()
-            .is_none_or(|launch| launch.credentials.iter().all(|check| check.available));
+        && launch.as_ref().is_none_or(|launch| {
+            let listed =
+                |check: &&crate::credentials::CredentialCheck| launch.one_of.contains(&check.id);
+            launch
+                .credentials
+                .iter()
+                .filter(|check| !listed(check))
+                .all(|check| check.available)
+                && (launch.one_of.is_empty()
+                    || launch
+                        .credentials
+                        .iter()
+                        .filter(listed)
+                        .any(|check| check.available))
+        });
     Ok(DoctorReport {
         requirements: plan.resolved.requirements,
         capabilities,
@@ -1490,13 +1689,37 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
     // receipt and a blocked launcher left behind.
     let signals = signals::install();
 
-    let plan = resolve(ctx, &args.policy, learning)?;
-    let request = plan_request(&plan);
-    let argv: Vec<Vec<u8>> = args
+    let operator_argv: Vec<Vec<u8>> = args
         .argv
         .iter()
         .map(|argument| argument.clone().into_vec())
         .collect();
+    let plan = resolve(
+        ctx,
+        &args.policy,
+        Purpose {
+            learning,
+            executing: true,
+            select_credentials: true,
+            argv0: if args.policy.selection.from_path {
+                None
+            } else {
+                operator_argv.first().map(Vec::as_slice)
+            },
+        },
+    )?;
+    let request = plan_request(&plan);
+    // J12 §3.3: under `--from-path` the operator's words follow the resolved
+    // program (and an `env` expansion's interpreter); that is the argv the
+    // digest covers and the launcher executes.
+    let argv: Vec<Vec<u8>> = match &plan.program {
+        Some(program) => program
+            .argv_prefix()
+            .into_iter()
+            .chain(operator_argv)
+            .collect(),
+        None => operator_argv,
+    };
     let argv_digest = (!argv.is_empty()).then(|| crate::canonical::argv_digest(&argv));
 
     validate_channels(args)?;
@@ -1504,6 +1727,14 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
 
     if args.label_only {
         return Ok(label_only(ctx, &plan, &request));
+    }
+    // J12 §3.3 step 6: one line before exec, only when a terminal watches
+    // (X05: with stderr a pipe or file the jail adds no byte to it).
+    if let Some(program) = &plan.program
+        && !(args.quiet || plan.quiet)
+        && stderr_is_a_terminal()
+    {
+        crate::diag!("{}", from_path::program_line(program, &plan.resolved));
     }
 
     // §8.2: "Initial preparation budget: 30 seconds". It covers steps 1 to 5
@@ -1521,6 +1752,13 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
     Ok(report)
 }
 
+/// Whether this process's stderr is a terminal: the J12 pre-exec line, like
+/// the summary, goes out only then (X05).
+fn stderr_is_a_terminal() -> bool {
+    // SAFETY: isatty takes a descriptor number and dereferences nothing.
+    unsafe { libc::isatty(2) == 1 }
+}
+
 /// The usage rules of §6.1 that clap does not express, and the supplied
 /// attempt id, parsed before any path derives from it.
 ///
@@ -1528,8 +1766,9 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
 /// [`ErrorCode::InvalidConfig`] for a usage error, and the id grammar's
 /// refusal.
 fn check_run_usage(args: &RunArgs) -> Result<Option<AttemptId>, JailError> {
-    // §6.1: PROGRAM is mandatory except with --label-only.
-    if !args.label_only && args.argv.is_empty() {
+    // §6.1: PROGRAM is mandatory except with --label-only; `--from-path`
+    // resolves it, so its arguments may be none.
+    if !args.label_only && !args.policy.selection.from_path && args.argv.is_empty() {
         return Err(usage("PROGRAM", "a program to run is required"));
     }
     if args.label_only && (args.gate_fd.is_some() || args.attempt_id.is_some()) {
@@ -2627,6 +2866,11 @@ fn prepare_launch(
         };
     record.credentials = receipt_credentials(&staged);
     state::record_staged_credentials(attempt_dir, &private_provenance(&staged))?;
+    // J12 §3.3 step 7: a credential bound to `@program` pinned the file the
+    // resolution pinned, not whatever its path names by now.
+    if let Some(program) = &plan.program {
+        check_program_binding(program, &staged)?;
+    }
     crate::credentials::LaunchHandoff::new(
         attempt_dir.vendor_state_path(),
         vendor.into_fd(),
@@ -2641,6 +2885,44 @@ fn prepare_launch(
             format!("vendor state could not be handed to the platform: {error}"),
         )
     })
+}
+
+/// J12: every staged vault credential bound to the resolved program's path
+/// pinned that very object: a swap between resolution and staging would
+/// otherwise bind the credential to the replacement.
+///
+/// # Errors
+/// [`ErrorCode::PolicyWidening`] at `--from-path` on an identity mismatch.
+fn check_program_binding(
+    program: &crate::program::Program,
+    staged: &[crate::credentials::StagedCredential],
+) -> Result<(), JailError> {
+    let bound = program.bound();
+    let Some(path) = bound.path.to_str() else {
+        return Ok(());
+    };
+    for credential in staged {
+        let Some(secret) = &credential.vault else {
+            continue;
+        };
+        let identities = secret.executable_identities();
+        for (binary, identity) in secret.policy.binaries.iter().zip(identities) {
+            if binary == path && identity != bound.identity() {
+                return Err(JailError::new(
+                    ErrorCode::PolicyWidening,
+                    ErrorStage::Preparing,
+                    Remediation::Retry,
+                    format!(
+                        "credential `{}` is bound to {path}, which changed between resolution \
+                         and staging; identity mismatch, nothing was run",
+                        credential.record.id
+                    ),
+                )
+                .with_key_path(crate::program::KEY));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Audit 2026-09-25-2, S6: the receipt rows for staged credentials. The
@@ -5530,6 +5812,7 @@ mod tests {
             config_dir: PathBuf::from("/config"),
             data_dir: PathBuf::from("/data"),
             quiet: false,
+            program: None,
         });
         assert_eq!(applied.network.mode, "host");
         assert!(applied.filesystem.is_none());
@@ -5550,6 +5833,7 @@ mod tests {
             config_dir: config_dir.clone(),
             data_dir: root.path().join("data"),
             quiet: false,
+            program: None,
         };
         // A workspace that covers the launch directory refuses, naming the
         // config directory the launch directory hangs off.
@@ -5580,6 +5864,7 @@ mod tests {
             config_dir: config_dir.clone(),
             data_dir: root.path().join("data"),
             quiet: false,
+            program: None,
         };
         // A workspace that covers the config directory refuses.
         let check = |plan: Plan| check_config_isolation(&plan, &ChildRoots::of(&plan));
@@ -5690,6 +5975,7 @@ mod tests {
             config_dir: root.path().join("config"),
             data_dir: data,
             quiet: false,
+            program: None,
         };
         (root, attempt_dir, plan)
     }

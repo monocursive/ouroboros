@@ -163,7 +163,29 @@ pub struct PreparedPlan {
     /// profile; `None` otherwise. The platform binds the proxy socket inside
     /// it and exposes it read-only by this descriptor.
     pub proxy: Option<ProxyDirHandoff>,
+    /// J12: the install roots `--from-path` derived, each with the handle
+    /// resolution reached it by. A read-only grant of one of these paths is
+    /// bound from this object, never pinned again by path, so what the
+    /// child sees is the directory the executable was pinned in.
+    pub pinned_roots: Vec<PinnedRoot>,
 }
+
+/// J12: one install root and the handle `--from-path` pinned it with.
+#[derive(Clone, Debug)]
+pub struct PinnedRoot {
+    /// The canonical directory, the source of the read-only grant.
+    pub path: PathBuf,
+    /// The directory, held since resolution (`O_PATH` on Linux).
+    pub handle: std::sync::Arc<std::os::fd::OwnedFd>,
+}
+
+impl PartialEq for PinnedRoot {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+    }
+}
+
+impl Eq for PinnedRoot {}
 
 /// The proxy directory the supervisor registered and created (§10).
 #[derive(Clone)]

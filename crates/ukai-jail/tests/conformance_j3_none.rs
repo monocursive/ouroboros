@@ -1237,6 +1237,7 @@ fn the_boundary_itself_refuses_a_restriction_it_would_not_apply() {
             config_dir: root.path().join("config"),
             launch: None,
             proxy: None,
+            pinned_roots: Vec::new(),
             prepare_deadline: ukai_jail::platform::ContinuousDeadline::after(Duration::from_secs(
                 10,
             )),

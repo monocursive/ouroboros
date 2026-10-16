@@ -40,9 +40,10 @@ pub(crate) use durable::{
     is_record_temp_name, leftover_temp_files_within, replace_atomically_at, write_fully,
 };
 pub use layout::{
-    AttemptDir, AttemptId, JAIL_OWNED_NAMES, SCRATCH_NAME, check_fresh_attempt, data_dir,
+    AttemptDir, AttemptId, JAIL_OWNED_NAMES, SCRATCH_NAME, check_fresh_attempt, config_dir,
+    data_dir,
 };
-pub(crate) use layout::{MANAGED_DIRS, POLICY_NAME, RECEIPT_NAME, STATE_NAME, config_dir};
+pub(crate) use layout::{MANAGED_DIRS, POLICY_NAME, RECEIPT_NAME, STATE_NAME};
 pub use lease::{Lease, LeaseProbe};
 pub use persist::{
     ABORT_AT_SEAM, PersistIo, Persister, RealIo, Site, test_seams_in, with_persist_io,

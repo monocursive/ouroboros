@@ -531,6 +531,7 @@ pub(super) mod tests {
                 config_dir: root.join("config"),
                 launch: None,
                 proxy: None,
+                pinned_roots: Vec::new(),
             };
             let Err(error) = LinuxPlatform::new().prepare(plan, Sinks { trace: None }) else {
                 panic!("{profile:?}: a boundary was prepared on a spent budget");

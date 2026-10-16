@@ -84,6 +84,24 @@
 #   stated. A run without a vault journals the frames it did before. New
 #   examples: event-proxy-vault.json, event-note-credential.json and
 #   summary-agent.json (product output). No shared field changed meaning.
+# - 2026-10-16 (J12, jail-launch-and-summary.md §3.2 to §3.4 and §7
+#   decision 4) re-blessed jail-receipt.schema.json and
+#   policy-snapshot.schema.json in place under their existing identifiers
+#   (ukai.jail.receipt/1, ukai.jail.policy-snapshot/1), in one commit as the
+#   proposal requires. Rationale: additive only. A receipt grant's `by` was
+#   the constant `operator` and is now the enum `operator`,
+#   `program_resolution`: a read-only install root `--from-path` derived
+#   from the program the operator named is attributed to that resolution,
+#   never to the operator (an operator's own `--ro` of the same path keeps
+#   `operator`). The snapshot's `roots` may carry `cwd`, the directory the
+#   child starts in relative to the workspace, omitted when it is the
+#   workspace root, so every policy run from its workspace root keeps its
+#   bytes and digest; and a vault credential may carry `env`, the variable
+#   its placeholder is bound to in place of UKAI_VAULT_<ID>, omitted when
+#   absent. No shared field changed meaning. validate_contract.py's ECMA `$`
+#   rewrite now leaves a `$` inside a character class alone (the vault
+#   header-name pattern has one), found by the first validation case with a
+#   vault header.
 schema = "ukai.jail.frozen-schemas/1"
 milestone = "milestone-1"
 
@@ -106,14 +124,14 @@ sha256 = "fa0ef7a7304567e7d91feb13492035cdedc8448f4d225e42e983d13dc71ab57e"
 file = "jail-receipt.schema.json"
 id = "urn:ukai:schema:jail-receipt:1"
 identifier = "ukai.jail.receipt/1"
-sha256 = "f3adeff7682cfd0ddb865b99abbde73b9ec6a72161982719359ae44a1041518a"
+sha256 = "ef6cd3c895ee771a926232e826a13db2fd8a54d70b8bf794cbd30f7ff8f7bc17"
 
 # §6.3, canonicalization.md: the canonical policy snapshot
 [[frozen]]
 file = "policy-snapshot.schema.json"
 id = "urn:ukai:schema:jail-policy-snapshot:1"
 identifier = "ukai.jail.policy-snapshot/1"
-sha256 = "623d251e8cb9fcecc418fcfd1f6fe3f8f8bfee10b406d5a431a808a90d71fc10"
+sha256 = "e209112cc93d21953b52fdf778d75adbf7d9af80d64e38263260736a9d6942b6"
 
 # §8.2: the managed gate release frame
 [[frozen]]

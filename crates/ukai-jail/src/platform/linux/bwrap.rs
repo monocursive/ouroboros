@@ -789,6 +789,10 @@ pub struct BwrapPlan {
     pub(crate) etc_paths: Vec<PathBuf>,
     /// The workspace, mounted at the same path inside.
     pub(crate) workspace: PathBuf,
+    /// J12: the child's working directory inside when it is not the
+    /// workspace: the directory beneath it the operator stood in
+    /// (`roots.cwd`).
+    pub(crate) cwd: Option<PathBuf>,
     /// How the workspace appears.
     pub(crate) workspace_access: WorkspaceAccess,
     /// The scratch directory, mounted at `/tmp` inside.
@@ -1004,6 +1008,7 @@ impl BwrapPlan {
             roots,
             etc_paths,
             workspace: workspace.to_owned(),
+            cwd: None,
             workspace_access: WorkspaceAccess::Writable,
             scratch: scratch.to_owned(),
             bounded_storage: false,
@@ -1386,7 +1391,10 @@ impl BwrapPlan {
         if self.bounded_storage {
             options.extend(["--remount-ro".into(), "/dev".into()]);
         }
-        options.extend(["--chdir".into(), self.workspace.clone().into()]);
+        options.extend([
+            "--chdir".into(),
+            self.cwd.as_ref().unwrap_or(&self.workspace).clone().into(),
+        ]);
         if let Some(fd) = self.seccomp_fd {
             options.extend(["--seccomp".into(), fd.to_string().into()]);
         }

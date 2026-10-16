@@ -211,6 +211,11 @@ You should see `hello from the jail` when you read the file. `tail` then shows
 the journal for the most recently updated attempt. The command had a writable
 workspace, no network access, and a 30-second deadline.
 
+The workspace is never your home directory, `/`, or a directory above your
+home: a contained run refuses one, however it was chosen, because your home
+holds your shell start-up files, SSH keys and agent credentials. Run from a
+project directory, as above, or pass `--workspace`.
+
 Everything after `--` is the program and its literal arguments. This example
 names `/bin/sh` because it needs shell redirection. For an ordinary program,
 pass its executable and arguments directly.
@@ -413,6 +418,33 @@ Contained profiles replace the host's `PATH`, so changing it only outside the
 jail does not expose a private tool directory to the agent.
 `doctor --launch` checks Jail capabilities and profile inputs; it does not
 verify every vendor tool dependency or provider availability.
+
+### Claude Code in one word
+
+`ukai-jail NAME …` is the short form of `ukai-jail run --launch NAME
+--from-path -- …`: the workspace is the git repository you are in, the
+program is `NAME` found on your `PATH` (its install directory granted
+read-only), and the child starts in your current directory. For Claude Code
+with a subscription, store a setup token once per host, then run it from
+inside a repository:
+
+```sh
+claude setup-token                       # browser flow; prints the token
+ukai-jail credential set claude-oauth    # paste it, then Enter and Ctrl-D
+
+ukai-jail claude -p "fix the failing test in parser.rs"
+```
+
+A Claude Console API key works instead: `ukai-jail credential set
+anthropic`. The agent only ever holds a placeholder; the jail puts the real
+value in its requests to `api.anthropic.com`, and only for the `claude`
+executable it resolved. Nothing from `~/.claude` is staged, so the run has
+none of your user settings, memory or MCP servers, keeps no session history
+across runs, and cannot push with git or update itself. `ukai-jail explain
+--launch claude --from-path` shows the program, its read-only directory and
+the policy before you run it. The `claude` profile is experimental: no
+Claude Code build has a recorded compatibility run yet, and only headless
+runs (`-p`) are the intended use.
 
 OpenCode has recorded live runs. The
 [compatibility table](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/agent-compatibility.md)

@@ -167,6 +167,24 @@ pub struct Roots {
     pub scratch: ScratchRoot,
     /// The vendor-state root, or null.
     pub vendor_state: Option<VendorStateRoot>,
+    /// J12: the directory the child starts in, relative to the workspace:
+    /// the invocation directory when it lies beneath the workspace, and the
+    /// workspace root (empty) otherwise. Omitted from the canonical form when
+    /// it is the root, so a policy run from its workspace root keeps its
+    /// digest (canonicalization.md).
+    #[serde(default = "root_cwd", skip_serializing_if = "is_root_cwd")]
+    pub cwd: NativeString,
+}
+
+/// The workspace root as a [`Roots::cwd`].
+#[must_use]
+pub fn root_cwd() -> NativeString {
+    NativeString::Text(String::new())
+}
+
+/// Whether a [`Roots::cwd`] is the workspace root.
+fn is_root_cwd(cwd: &NativeString) -> bool {
+    cwd.as_bytes().is_empty()
 }
 
 /// Protected-path coverage (north star §4.4).
@@ -805,6 +823,13 @@ pub enum LayerOrigin {
     /// An operator launch profile (`<config-dir>/launch/<name>.toml`), whose
     /// `network.allow` is an operator grant.
     LaunchProfile(String),
+    // J12: `--from-path` (jail-launch-and-summary.md §3.3)
+    /// The read-only install roots `--from-path` derived from the resolved
+    /// program: an operator layer (the operator asked for the launch), whose
+    /// grants the receipt attributes to `program_resolution`, never to the
+    /// operator, and which adds nothing a root it lies beneath already
+    /// grants.
+    ProgramResolution,
 }
 
 impl LayerOrigin {
@@ -821,6 +846,20 @@ impl LayerOrigin {
         )
         // A launch profile's allowed hosts are operator grants
         || matches!(self, LayerOrigin::LaunchProfile(_))
+        // J12: derived from the program the operator named
+        || matches!(self, LayerOrigin::ProgramResolution)
+    }
+
+    /// Who the receipt says made this layer's grants (`policy.grants[].by`):
+    /// `program_resolution` for the install roots `--from-path` derived, so
+    /// a reader never takes one for a grant the operator typed, and
+    /// `operator` for every other grant.
+    #[must_use]
+    pub fn grantor(&self) -> &'static str {
+        match self {
+            LayerOrigin::ProgramResolution => "program_resolution",
+            _ => "operator",
+        }
     }
 
     /// Whether this layer may RAISE a resource ceiling above the base
@@ -895,7 +934,8 @@ impl LayerOrigin {
             LayerOrigin::LaunchProfile(_) => "launch.",
             LayerOrigin::OperatorProfileFile(_)
             | LayerOrigin::Environment
-            | LayerOrigin::CommandLine => "",
+            | LayerOrigin::CommandLine
+            | LayerOrigin::ProgramResolution => "",
         }
     }
 
@@ -909,6 +949,7 @@ impl LayerOrigin {
             LayerOrigin::CommandLine => "cli".to_owned(),
             LayerOrigin::ProjectConfig(name) => format!("project-config:{name}"),
             LayerOrigin::LaunchProfile(name) => format!("launch-profile:{name}"),
+            LayerOrigin::ProgramResolution => "program-resolution".to_owned(),
         }
     }
 }
@@ -1427,12 +1468,13 @@ impl Resolution {
         });
     }
 
-    /// Records an explicit operator grant (§13.2: the receipt's grants).
-    fn grant(&mut self, kind: &str, value: NativeString) {
+    /// Records an explicit grant (§13.2: the receipt's grants), by the
+    /// grantor `origin` names ([`LayerOrigin::grantor`]).
+    fn grant(&mut self, origin: &LayerOrigin, kind: &str, value: NativeString) {
         self.grants.push(crate::records::Grant {
             kind: kind.to_owned(),
             value,
-            by: "operator".to_owned(),
+            by: origin.grantor().to_owned(),
         });
     }
 }
@@ -1623,8 +1665,22 @@ impl<'a> LayerStep<'a> {
                 ),
             ));
         }
+        // J12: a derived install root that a root before it already makes
+        // readable adds nothing (an npm install under `/usr`, or the
+        // operator's own `--ro` of it). It is disclosed, not granted, so the
+        // receipt never lists a grant that is no new access (spike record
+        // 2026-10-16).
+        if layer.origin == LayerOrigin::ProgramResolution
+            && matches!(
+                self.base.mode_at(&reference),
+                AccessMode::ReadOnly | AccessMode::ReadWrite
+            )
+        {
+            resolution.set_by(layer, key, Some("covered".to_owned()));
+            return Ok(());
+        }
         if layer.origin.is_operator_grant() {
-            resolution.grant(kind, native(absolute, &key)?);
+            resolution.grant(&layer.origin, kind, native(absolute, &key)?);
         }
         list.of(&mut resolution.authority).push(reference);
         resolution.set_by(layer, key, None);
@@ -1730,7 +1786,11 @@ impl<'a> LayerStep<'a> {
                 }
             })?;
             if self.layer.origin.is_operator_grant() {
-                resolution.grant("allow_host", NativeString::Text(rule.canonical()));
+                resolution.grant(
+                    &self.layer.origin,
+                    "allow_host",
+                    NativeString::Text(rule.canonical()),
+                );
             }
             if self.narrowing
                 && !self
@@ -1916,6 +1976,7 @@ fn build_snapshot(
             workspace,
             scratch,
             vendor_state: inputs.vendor_state,
+            cwd: root_cwd(),
         },
         filesystem: FilesystemSnapshot {
             read_write: authority.read_write.clone(),

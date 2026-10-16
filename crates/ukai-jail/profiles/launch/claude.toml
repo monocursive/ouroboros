@@ -1,27 +1,59 @@
-# EXPERIMENTAL launch profile (jail-v1 §12, north star §4.5).
+# EXPERIMENTAL launch profile for Claude Code (jail-v1 §12, north star §4.5,
+# jail-launch-and-summary.md §3.5). No Claude Code build has a recorded
+# compatibility run yet (jail-v1 agent-compatibility.md).
 #
-# Embedded starter data, selected with `--launch claude`. An operator file
-# at `<config-dir>/launch/claude.toml` (mode 0600) overrides it. Review
-# its grants against the installation. Compatibility remains experimental
-# except for the exact builds recorded in agent-compatibility.md.
+# Embedded starter data, selected by `ukai-jail claude …` or `--launch
+# claude`. An operator file at `<config-dir>/launch/claude.toml` (mode 0600)
+# overrides it. Review its grants against the installation.
 #
-# Sources are the north star's initial inputs: file credentials and settings
-# from the node's Claude config directory (`~/.claude`). There is no Keychain
-# extraction; a macOS Keychain credential is a separate, unscheduled problem.
+# Once per host, a subscription user stores a `claude setup-token` value:
+#
+#   claude setup-token                       # browser flow; prints the token
+#   ukai-jail credential set claude-oauth    # paste it; stored mode 0600
+#
+# (or a Claude Console API key with `ukai-jail credential set anthropic`), and
+# every run is then `ukai-jail claude -p "…"` from inside a git repository.
+# The child sees only a placeholder under its own variable name; the proxy
+# puts the real value in the request header, only for api.anthropic.com and
+# only on connections the resolved `claude` executable made. Exactly one
+# credential is staged, the first present, so Claude Code's own precedence
+# (an API key outranks the setup token) never picks the paying account
+# silently. Nothing from `~/.claude` or `~/.claude.json` is staged: no file
+# that holds a refresh token reaches the child.
+#
+# Measured for Claude Code 2.1.295 on the reference host
+# (docs/benchmarks/jail/claude-setup-token-spike-2026-10-16.md): the setup
+# token travels in `Authorization: Bearer`, the client accepts the
+# placeholder, a headless (`-p`) run contacts only api.anthropic.com with
+# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1, and no HOME is needed.
 
 name = "claude"
 jail = "agent"
 state_var = "CLAUDE_CONFIG_DIR"
+credentials_one_of = ["claude-oauth", "anthropic"]
 
-# [credentials.credentials]
-# source = "~/.claude/.credentials.json"
-# dest = ".credentials.json"
-# mode = "copy_rw"
+[environment]
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+DISABLE_AUTOUPDATER = "1"
 
-# [credentials.settings]
-# source = "~/.claude/settings.json"
-# dest = "settings.json"
-# mode = "bind_ro"
+[credentials.claude-oauth]
+mode = "vault"
+source = "@config/credentials/claude-oauth"
+env = "CLAUDE_CODE_OAUTH_TOKEN"
+hosts = ["https://api.anthropic.com"]
+# Measured, not documented (spike record above).
+header = { name = "authorization", prefix = "Bearer " }
+binaries = ["@program"]
+hint = "run `claude setup-token` on this host, then `ukai-jail credential set claude-oauth`"
+
+[credentials.anthropic]
+mode = "vault"
+source = "@config/credentials/anthropic"
+env = "ANTHROPIC_API_KEY"
+hosts = ["https://api.anthropic.com"]
+header = { name = "x-api-key" }
+binaries = ["@program"]
+hint = "put a Claude Console API key in it: `ukai-jail credential set anthropic`"
 
 [network]
 allow = ["api.anthropic.com"]

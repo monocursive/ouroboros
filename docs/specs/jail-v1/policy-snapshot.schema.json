@@ -119,6 +119,32 @@
               "type": "null"
             }
           ]
+        },
+        "cwd": {
+          "description": "J12: the directory the child starts in, relative to the workspace; omitted when it is the workspace root.",
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "object",
+              "properties": {
+                "encoding": {
+                  "const": "base64"
+                },
+                "data": {
+                  "type": "string",
+                  "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+                }
+              },
+              "required": [
+                "encoding",
+                "data"
+              ],
+              "additionalProperties": false
+            }
+          ]
         }
       },
       "required": [
@@ -792,6 +818,11 @@
                           "type": "string",
                           "maxLength": 4096
                         }
+                      },
+                      "env": {
+                        "description": "J12: the variable the placeholder is bound to in the child, in place of UKAI_VAULT_<ID>.",
+                        "type": "string",
+                        "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,255}$"
                       },
                       "refresh": {
                         "type": "object",

@@ -127,6 +127,11 @@ impl Executable {
         let identity = identity(&file).map_err(|_| "vault executable cannot be inspected")?;
         Ok(Self { file, identity })
     }
+
+    /// The `(dev, ino)` this executable was pinned with.
+    pub(super) fn identity(&self) -> (u64, u64) {
+        (self.identity.dev, self.identity.ino)
+    }
 }
 #[derive(Clone)]
 pub(crate) struct Process(Arc<Pinned>);

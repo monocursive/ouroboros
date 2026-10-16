@@ -10,7 +10,8 @@ use std::process::ExitCode;
 use clap::Parser as _;
 use ukai_jail::capability::Capability;
 use ukai_jail::cli::{
-    Cli, Command, DoctorArgs, ExplainArgs, GcArgs, RunArgs, TailArgs, VersionArgs,
+    Cli, Command, CredentialCommand, DoctorArgs, ExplainArgs, GcArgs, RunArgs, TailArgs,
+    VersionArgs,
 };
 use ukai_jail::config;
 use ukai_jail::observer::CoverageSummary;
@@ -30,7 +31,19 @@ fn main() -> ExitCode {
     if let Some(code) = internal_subcommand() {
         return code;
     }
-    let cli = Cli::parse();
+    // J12 §3.1: `ukai-jail NAME [ARG]...` is exactly `ukai-jail run --launch
+    // NAME --from-path -- ARG...`; built-in verbs win, and a word that is
+    // neither a verb nor a launch profile is a usage error naming both.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let cli = match ukai_jail::cli::alias_argv(&args) {
+        Some(argv) => {
+            if let Err(code) = check_alias(&args[1]) {
+                return code;
+            }
+            Cli::parse_from(argv)
+        }
+        None => Cli::parse(),
+    };
     // J4 autoscope: jail-v1 §9.3 — `run` and `doctor` enter a delegated user
     // scope themselves when started outside one, first, before any thread or
     // other resource exists, so an attempt gets its execution leaf. The step
@@ -61,6 +74,129 @@ fn main() -> ExitCode {
             }
         },
         Command::Tail(args) => tail(&context, &args),
+        Command::Credential(command) => credential(&context, &command),
+    }
+}
+
+/// J12: the first word of an alias names a launch profile, an operator file
+/// or a bundled one; otherwise exit 2 naming both readings (§3.1).
+fn check_alias(word: &std::ffi::OsStr) -> Result<(), ExitCode> {
+    let shown = records::escape_control(&word.to_string_lossy());
+    let refuse = |why: String| {
+        ukai_jail::diag!("ukai-jail: {why}");
+        Err(ExitCode::from(2))
+    };
+    let Some(name) = word.to_str() else {
+        return refuse(format!("no verb or launch profile `{shown}`"));
+    };
+    let config_dir = config::env_settings(&|name| std::env::var_os(name)).and_then(|settings| {
+        ukai_jail::state::config_dir(
+            &settings,
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .as_deref(),
+        )
+    });
+    let exists = config_dir
+        .as_ref()
+        .is_ok_and(|dir| ukai_jail::launch_profile::exists(dir, name));
+    if exists {
+        return Ok(());
+    }
+    refuse(format!(
+        "no verb or launch profile `{shown}` (verbs: {}; launch profiles: bundled, or \
+         <config-dir>/launch/{shown}.toml)",
+        ukai_jail::cli::VERBS.join(", ")
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// credential
+// ---------------------------------------------------------------------------
+
+/// `ukai-jail credential set ID` / `credential rm ID` (J12, §3.5): 0 when
+/// done, 1 when refused, 2 for a malformed id. The value is read from stdin
+/// only and never printed.
+fn credential(context: &Context, command: &CredentialCommand) -> ExitCode {
+    use ukai_jail::credential_store;
+    let config_dir =
+        match ukai_jail::state::config_dir(&context.env_settings, context.home.as_deref()) {
+            Ok(dir) => dir,
+            Err(error) => return fail(&error),
+        };
+    let id = match command {
+        CredentialCommand::Set(args) => &args.id,
+        CredentialCommand::Rm(args) => &args.id,
+    };
+    if let Err(why) = credential_store::check_id(id) {
+        ukai_jail::diag!("ukai-jail: credential: {why}");
+        return ExitCode::from(2);
+    }
+    let result = match command {
+        CredentialCommand::Set(args) => {
+            let value = {
+                let _quiet = (std::io::IsTerminal::is_terminal(&std::io::stdin())).then(|| {
+                    ukai_jail::diag!(
+                        "ukai-jail: paste the value of `{}`, then press Enter and Ctrl-D \
+                         (it is not shown)",
+                        args.id
+                    );
+                    EchoOff::new()
+                });
+                credential_store::read_value(&mut std::io::stdin().lock())
+            };
+            match value {
+                Err(error) => Err(format!("the value cannot be read: {error}")),
+                Ok(Err(refusal)) => Err(refusal.to_string()),
+                Ok(Ok(value)) => credential_store::set(&config_dir, &args.id, &value, args.force)
+                    .map(|path| format!("stored credential `{}` in {}", args.id, path.display())),
+            }
+        }
+        CredentialCommand::Rm(args) => credential_store::remove(&config_dir, &args.id)
+            .map(|path| format!("removed credential `{}` ({})", args.id, path.display())),
+    };
+    match result {
+        Ok(done) => {
+            ukai_jail::diag!("ukai-jail: {}", records::escape_control(&done));
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            ukai_jail::diag!("ukai-jail: credential: {}", records::escape_control(&why));
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Terminal echo turned off on stdin for as long as this lives (a pasted
+/// credential is never shown), restored when dropped.
+struct EchoOff(Option<libc::termios>);
+
+impl EchoOff {
+    fn new() -> Self {
+        // SAFETY: termios is plain data that tcgetattr fills; all-zero is a
+        // valid value to start from.
+        let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: descriptor 0 and a live termios buffer.
+        if unsafe { libc::tcgetattr(0, &raw mut saved) } != 0 {
+            return EchoOff(None);
+        }
+        let mut quiet = saved;
+        quiet.c_lflag &= !(libc::ECHO | libc::ECHONL);
+        // SAFETY: descriptor 0 and a live termios value.
+        if unsafe { libc::tcsetattr(0, libc::TCSAFLUSH, &raw const quiet) } != 0 {
+            return EchoOff(None);
+        }
+        EchoOff(Some(saved))
+    }
+}
+
+impl Drop for EchoOff {
+    fn drop(&mut self) {
+        if let Some(saved) = self.0 {
+            // SAFETY: descriptor 0 and the termios value read before.
+            unsafe { libc::tcsetattr(0, libc::TCSAFLUSH, &raw const saved) };
+            ukai_jail::diag!("");
+        }
     }
 }
 
@@ -353,7 +489,90 @@ fn explain_json(report: &ExplainReport) -> Result<serde_json::Value, JailError> 
             "note": "explain resolves and renders policy; it probes nothing and executes nothing",
         },
         "provenance": report.resolved.provenance,
+        // J12 §3.3 step 6: the resolved program, the argv prefix the
+        // operator's arguments follow and every derived root.
+        "program": report.program.as_ref().map(|(program, roots)| program_json(program, roots)),
     }))
+}
+
+/// J12: the resolved program as `explain --json` and the doctor text show
+/// it.
+fn program_json(
+    program: &ukai_jail::program::Program,
+    roots: &[ukai_jail::supervisor::from_path::DerivedRoot],
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": program.name,
+        "path": program.program.path.to_string_lossy(),
+        "format": program.format.as_str(),
+        "interpreter": program
+            .interpreter
+            .as_ref()
+            .map(|interpreter| interpreter.path.to_string_lossy()),
+        "argv": program
+            .argv_prefix()
+            .iter()
+            .map(|word| String::from_utf8_lossy(word).into_owned())
+            .collect::<Vec<_>>(),
+        "roots": roots
+            .iter()
+            .map(|root| serde_json::json!({
+                "path": root.path.to_string_lossy(),
+                "status": if root.granted { "granted" } else { "covered" },
+                "by": if root.granted { Some("program_resolution") } else { None },
+                "covered_by": root.covered_by,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// J12: the resolved program's text lines, shared by `explain` and
+/// `doctor`; every path escaped (audit M1).
+fn program_text(
+    out: &mut String,
+    program: &ukai_jail::program::Program,
+    roots: &[ukai_jail::supervisor::from_path::DerivedRoot],
+) {
+    use std::fmt::Write as _;
+    let escape = |path: &std::path::Path| records::escape_control(&path.to_string_lossy());
+    let _ = writeln!(
+        out,
+        "program {} = {} format={}",
+        records::escape_control(&program.name),
+        escape(&program.program.path),
+        program.format.as_str()
+    );
+    if let Some(interpreter) = &program.interpreter {
+        let _ = writeln!(out, "program interpreter {}", escape(&interpreter.path));
+    }
+    let argv: Vec<String> = program
+        .argv_prefix()
+        .iter()
+        .map(|word| records::escape_control(&String::from_utf8_lossy(word)))
+        .collect();
+    let _ = writeln!(out, "program argv {}", argv.join(" "));
+    for root in roots {
+        match (&root.covered_by, root.granted) {
+            (_, true) => {
+                let _ = writeln!(
+                    out,
+                    "program read_only {} by=program_resolution",
+                    escape(&root.path)
+                );
+            }
+            (Some(by), false) => {
+                let _ = writeln!(
+                    out,
+                    "program read_only {} covered_by={} (already readable, not a new grant)",
+                    escape(&root.path),
+                    records::escape_control(by)
+                );
+            }
+            (None, false) => {
+                let _ = writeln!(out, "program read_only {} not_granted", escape(&root.path));
+            }
+        }
+    }
 }
 
 // Security 2026-10-08 (audit M1): the text rendering is a pure function, so
@@ -453,6 +672,17 @@ fn explain_text(report: &ExplainReport) -> String {
                 records::escape_control(&credential.dest.to_display())
             );
         }
+    }
+    // J12: `roots.cwd`, when the child does not start at the workspace root
+    if !snapshot.roots.cwd.as_bytes().is_empty() {
+        let _ = writeln!(
+            out,
+            "cwd workspace:{}",
+            records::escape_control(&snapshot.roots.cwd.to_display())
+        );
+    }
+    if let Some((program, roots)) = &report.program {
+        program_text(&mut out, program, roots);
     }
     for requirement in &report.resolved.requirements {
         let _ = writeln!(out, "requirement {requirement} unmeasured");
@@ -606,6 +836,60 @@ fn doctor_text(report: &DoctorReport) -> String {
                 },
                 check.reason_code
             );
+            // J12 §3.4: how to provide a missing source
+            if !check.available
+                && let Some(hint) = launch.hints.get(&check.id)
+            {
+                let _ = writeln!(
+                    out,
+                    "credential {} hint: {}",
+                    records::escape_control(&check.id),
+                    records::escape_control(hint)
+                );
+            }
+        }
+        if !launch.one_of.is_empty() {
+            let _ = writeln!(
+                out,
+                "credentials one_of {}: the first present is staged, the rest skipped",
+                launch
+                    .one_of
+                    .iter()
+                    .map(|id| records::escape_control(id))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+        // J12 §3.1: a profile named like a verb is reachable only through
+        // `run --launch`.
+        if launch.shadowed_by_verb {
+            let _ = writeln!(
+                out,
+                "launch {name} shadowed: `ukai-jail {name}` runs the built-in verb; use \
+                 `ukai-jail run --launch {name}`",
+                name = records::escape_control(&launch.name)
+            );
+        }
+        // J12 §3.7: the support claim is headless
+        let _ = writeln!(
+            out,
+            "launch {} interactive_sessions unrecorded (no recorded interactive run; headless \
+             runs such as `-p` are the claim)",
+            records::escape_control(&launch.name)
+        );
+        if let Some((program, roots)) = &launch.program {
+            program_text(&mut out, program, roots);
+            if let Some(interpreter) = &program.interpreter {
+                let _ = writeln!(
+                    out,
+                    "program binding: a credential bound to `@program` is bound to the \
+                     interpreter {}, so any script it runs could present it",
+                    records::escape_control(&interpreter.path.to_string_lossy())
+                );
+            }
+        }
+        if let Some(note) = &launch.worktree {
+            let _ = writeln!(out, "workspace {note}");
         }
     }
     let _ = writeln!(out, "ready {}", report.ready);
@@ -1060,6 +1344,7 @@ mod tests {
         ExplainReport {
             resolved,
             platform: m1_platform(),
+            program: None,
         }
     }
 
@@ -1100,6 +1385,7 @@ mod tests {
         let text = explain_text(&ExplainReport {
             resolved,
             platform: m1_platform(),
+            program: None,
         });
         assert!(text.contains("read_only host:sec<U+202E>ret"), "{text}");
         assert!(!text.contains('\u{202e}'), "{text}");
@@ -1108,6 +1394,7 @@ mod tests {
         let clean = explain_text(&ExplainReport {
             resolved: m1_resolved(),
             platform: m1_platform(),
+            program: None,
         });
         assert!(clean.starts_with("policy tool\nprofile tool\n"), "{clean}");
         assert!(
@@ -1137,6 +1424,7 @@ mod tests {
         let text = explain_text(&ExplainReport {
             resolved,
             platform: m1_platform(),
+            program: None,
         });
         let limits: Vec<&str> = text
             .lines()

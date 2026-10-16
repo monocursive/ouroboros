@@ -85,6 +85,8 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config", "data", "cache", "state"]
 network_allow = []
+program_root = 1
+credentials_one_of = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
@@ -94,6 +96,8 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config", "data", "cache", "state"]
 network_allow = []
+program_root = 1
+credentials_one_of = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
@@ -103,6 +107,8 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config", "data", "cache", "state"]
 network_allow = []
+program_root = 1
+credentials_one_of = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
@@ -113,6 +119,8 @@ state_var = "CLAUDE_CONFIG_DIR"
 home_is_state = false
 state_subdirs = []
 network_allow = ["api.anthropic.com"]
+program_root = 1
+credentials_one_of = []
 environment = "{\"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC\":\"1\"}"
 [[launch_profile.credential]]
 id = "anthropic"
@@ -129,7 +137,21 @@ state_var = "CLAUDE_CONFIG_DIR"
 home_is_state = false
 state_subdirs = []
 network_allow = ["api.anthropic.com"]
-environment = "{}"
+program_root = 1
+credentials_one_of = ["claude-oauth", "anthropic"]
+environment = "{\"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC\":\"1\",\"DISABLE_AUTOUPDATER\":\"1\"}"
+[[launch_profile.credential]]
+id = "anthropic"
+source = "@config/credentials/anthropic"
+dest = ""
+mode = "vault"
+definition = "{\"binaries\":[\"@program\"],\"env\":\"ANTHROPIC_API_KEY\",\"header\":{\"name\":\"x-api-key\"},\"hint\":\"put a Claude Console API key in it: `ukai-jail credential set anthropic`\",\"hosts\":[\"https://api.anthropic.com\"],\"mode\":\"vault\",\"source\":\"@config/credentials/anthropic\"}"
+[[launch_profile.credential]]
+id = "claude-oauth"
+source = "@config/credentials/claude-oauth"
+dest = ""
+mode = "vault"
+definition = "{\"binaries\":[\"@program\"],\"env\":\"CLAUDE_CODE_OAUTH_TOKEN\",\"header\":{\"name\":\"authorization\",\"prefix\":\"Bearer \"},\"hint\":\"run `claude setup-token` on this host, then `ukai-jail credential set claude-oauth`\",\"hosts\":[\"https://api.anthropic.com\"],\"mode\":\"vault\",\"source\":\"@config/credentials/claude-oauth\"}"
 
 [[launch_profile]]
 file = "crates/ukai-jail/profiles/launch/cline.toml"
@@ -138,6 +160,8 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config", "data", "cache", "state"]
 network_allow = []
+program_root = 1
+credentials_one_of = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
@@ -148,6 +172,8 @@ state_var = "CODEX_HOME"
 home_is_state = true
 state_subdirs = []
 network_allow = ["*.openai.com"]
+program_root = 1
+credentials_one_of = []
 environment = "{}"
 
 [[launch_profile]]
@@ -157,6 +183,8 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config", "data", "cache", "state"]
 network_allow = []
+program_root = 1
+credentials_one_of = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
@@ -166,6 +194,8 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config", "data", "cache", "state"]
 network_allow = []
+program_root = 1
+credentials_one_of = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
@@ -175,6 +205,8 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config", "data", "cache", "state"]
 network_allow = []
+program_root = 1
+credentials_one_of = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
@@ -184,6 +216,8 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config", "data", "cache", "state"]
 network_allow = []
+program_root = 1
+credentials_one_of = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
@@ -193,6 +227,8 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config", "data", "cache", "state"]
 network_allow = []
+program_root = 1
+credentials_one_of = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
@@ -202,6 +238,8 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config", "data", "cache", "state"]
 network_allow = []
+program_root = 1
+credentials_one_of = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
@@ -211,6 +249,8 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config/opencode", "data/opencode", "cache/opencode", "state/opencode"]
 network_allow = ["api.anthropic.com", "models.opencode.ai", "opencode.ai"]
+program_root = 1
+credentials_one_of = []
 environment = "{\"OPENCODE_DISABLE_AUTOUPDATE\":\"true\",\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 [[launch_profile.credential]]
 id = "anthropic"
@@ -226,6 +266,8 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config/opencode", "data/opencode", "cache/opencode", "state/opencode"]
 network_allow = ["opencode.ai", "models.opencode.ai", "registry.npmjs.org"]
+program_root = 1
+credentials_one_of = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
@@ -235,6 +277,8 @@ jail = "agent"
 home_is_state = true
 state_subdirs = ["config", "data", "cache", "state"]
 network_allow = []
+program_root = 1
+credentials_one_of = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 # What every contained profile passes from the operator's environment, and its PATH
@@ -1250,12 +1294,12 @@ sha256 = "fa0ef7a7304567e7d91feb13492035cdedc8448f4d225e42e983d13dc71ab57e"
 file = "jail-receipt.schema.json"
 id = "urn:ukai:schema:jail-receipt:1"
 identifier = "ukai.jail.receipt/1"
-sha256 = "f3adeff7682cfd0ddb865b99abbde73b9ec6a72161982719359ae44a1041518a"
+sha256 = "ef6cd3c895ee771a926232e826a13db2fd8a54d70b8bf794cbd30f7ff8f7bc17"
 [[frozen_schemas.entry]]
 file = "policy-snapshot.schema.json"
 id = "urn:ukai:schema:jail-policy-snapshot:1"
 identifier = "ukai.jail.policy-snapshot/1"
-sha256 = "623d251e8cb9fcecc418fcfd1f6fe3f8f8bfee10b406d5a431a808a90d71fc10"
+sha256 = "e209112cc93d21953b52fdf778d75adbf7d9af80d64e38263260736a9d6942b6"
 [[frozen_schemas.entry]]
 file = "jail-gate.schema.json"
 id = "urn:ukai:schema:jail-gate:1"

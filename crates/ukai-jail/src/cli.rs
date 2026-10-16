@@ -47,6 +47,53 @@ pub enum Command {
     Gc(GcArgs),
     /// Print versions and the schema identifiers this build announces.
     Version(VersionArgs),
+    /// Store or remove a credential source under the config directory.
+    #[command(subcommand)]
+    Credential(CredentialCommand),
+}
+
+/// The verbs `ukai-jail NAME` never takes as a launch name (J12,
+/// jail-launch-and-summary.md §3.1): every built-in verb, clap's `help`
+/// and the hidden subcommands.
+pub const VERBS: &[&str] = &[
+    "run",
+    "tail",
+    "learn",
+    "explain",
+    "doctor",
+    "gc",
+    "version",
+    "help",
+    "credential",
+];
+
+/// `ukai-jail credential` (J12, §3.5): operator verbs that write the files a
+/// launch profile's `@config/credentials/ID` sources name.
+#[derive(Debug, Subcommand)]
+pub enum CredentialCommand {
+    /// Read one value from stdin and store it as config/credentials/ID.
+    Set(CredentialSetArgs),
+    /// Remove config/credentials/ID.
+    Rm(CredentialRmArgs),
+}
+
+/// `ukai-jail credential set ID`.
+#[derive(Debug, Args)]
+pub struct CredentialSetArgs {
+    /// The credential id, as a launch profile names it.
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// Replace an existing value.
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// `ukai-jail credential rm ID`.
+#[derive(Debug, Args)]
+pub struct CredentialRmArgs {
+    /// The credential id, as a launch profile names it.
+    #[arg(value_name = "ID")]
+    pub id: String,
 }
 
 /// The policy a command selects and the roots it applies to (§6.1): every
@@ -65,6 +112,10 @@ pub struct Selection {
     /// An explicit scratch directory; defaults to a private attempt directory.
     #[arg(long, value_name = "PATH")]
     pub scratch: Option<PathBuf>,
+    /// Resolve the launch name on PATH as the program, grant its install
+    /// root read-only, and default the workspace to the repository top level.
+    #[arg(long = "from-path", requires = "launch")]
+    pub from_path: bool,
 }
 
 /// Policy selection and override flags, shared by `run` and `explain`
@@ -147,14 +198,18 @@ pub struct RunArgs {
     #[arg(long = "control-fd", value_name = "N")]
     pub control_fd: Option<i32>,
     /// Inherited descriptor carrying the managed release frame.
-    #[arg(long = "gate-fd", value_name = "N", conflicts_with = "label_only")]
+    #[arg(
+        long = "gate-fd",
+        value_name = "N",
+        conflicts_with_all = ["label_only", "from_path"]
+    )]
     pub gate_fd: Option<i32>,
     /// Bind this attempt to an owner's pre-existing reservation.
     #[arg(
         long = "attempt-id",
         value_name = "ID",
         requires = "gate_fd",
-        conflicts_with = "label_only"
+        conflicts_with_all = ["label_only", "from_path"]
     )]
     pub attempt_id: Option<String>,
     /// Resolve, probe and print the proposed label without executing.
@@ -164,7 +219,8 @@ pub struct RunArgs {
     /// still print.
     #[arg(long)]
     pub quiet: bool,
-    /// PROGRAM and its arguments, after `--`.
+    /// PROGRAM and its arguments, after `--`; with --from-path, the
+    /// arguments the resolved program gets.
     #[arg(
         last = true,
         value_name = "PROGRAM",
@@ -172,6 +228,30 @@ pub struct RunArgs {
         value_parser = clap::value_parser!(OsString)
     )]
     pub argv: Vec<OsString>,
+}
+
+/// J12: the argv `ukai-jail NAME [ARG]...` stands for, exactly `ukai-jail run
+/// --launch NAME --from-path -- ARG...` (§3.1). `args` is the process argv;
+/// `None` when its first word is a built-in verb, an option, or nothing,
+/// which clap parses as before. The alias parses no jail option: every word
+/// after `NAME` is the agent's.
+#[must_use]
+pub fn alias_argv(args: &[OsString]) -> Option<Vec<OsString>> {
+    let first = args.get(1)?;
+    let word = first.to_str();
+    if word.is_some_and(|word| word.starts_with('-') || VERBS.contains(&word)) {
+        return None;
+    }
+    let mut argv = vec![
+        args[0].clone(),
+        OsString::from("run"),
+        OsString::from("--launch"),
+        first.clone(),
+        OsString::from("--from-path"),
+        OsString::from("--"),
+    ];
+    argv.extend(args[2..].iter().cloned());
+    Some(argv)
 }
 
 /// `ukai-jail explain`.

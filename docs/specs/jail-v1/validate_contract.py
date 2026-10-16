@@ -49,12 +49,37 @@ ROOT = Path(__file__).resolve().parent
 DECIMAL = re.compile(r"(0|[1-9][0-9]*)\Z")
 
 
+def ecma_anchored(pattern):
+    """`pattern` with each unescaped `$` outside a character class written as
+    `\\Z`: ECMA-262's `$` matches only the end of the string, Python's also
+    before a final newline. A `$` inside `[...]` is a literal (the vault
+    header-name pattern has one) and stays."""
+    out, escaped, in_class = [], False, False
+    for char in pattern:
+        if escaped:
+            out.append(char)
+            escaped = False
+        elif char == "\\":
+            out.append(char)
+            escaped = True
+        elif char == "[" and not in_class:
+            out.append(char)
+            in_class = True
+        elif char == "]" and in_class:
+            out.append(char)
+            in_class = False
+        elif char == "$" and not in_class:
+            out.append("\\Z")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
 def ecma_pattern(validator, pattern, instance, schema):
     """JSON Schema `pattern` with ECMA-262 `$`: only the end of the string."""
     if not validator.is_type(instance, "string"):
         return
-    anchored = re.sub(r"(?<!\\)\$", r"\\Z", pattern)
-    if not re.search(anchored, instance):
+    if not re.search(ecma_anchored(pattern), instance):
         yield ValidationError(f"{instance!r} does not match {pattern!r}")
 
 

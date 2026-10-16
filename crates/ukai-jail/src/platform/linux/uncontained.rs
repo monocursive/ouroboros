@@ -624,7 +624,9 @@ impl Uncontained {
         // something it was started beside, not the attempt.
         let inherited = Inherited::below(crate::sys::own_pid());
 
-        let spawned = spawn_launcher(&exe, &argv, &env, &plan.workspace, observe_on)?;
+        // J12 §3.2 step 4: the child starts where the snapshot says.
+        let start = super::mounts::join_native(&plan.workspace, &snapshot.roots.cwd);
+        let spawned = spawn_launcher(&exe, &argv, &env, &start, observe_on)?;
         let audit = AuditWriter::new(
             &plan.attempt_id,
             sinks.trace.clone(),

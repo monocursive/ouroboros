@@ -4058,5 +4058,180 @@
         ]
       }
     ]
+  },
+  {
+    "name": "J12 a derived install root is attributed to program_resolution",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-agent-proxy-only.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "policy",
+          "grants"
+        ],
+        "value": [
+          {
+            "kind": "read_only",
+            "value": "/home/u/.local/share/claude/versions",
+            "by": "program_resolution"
+          },
+          {
+            "kind": "read_only",
+            "value": "/opt/tools",
+            "by": "operator"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "J12 a grant names no other grantor",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-agent-proxy-only.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "policy",
+          "grants"
+        ],
+        "value": [
+          {
+            "kind": "read_only",
+            "value": "/opt/tools",
+            "by": "launch_profile"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "J12 roots.cwd names the directory the child starts in",
+    "schema": "policy-snapshot",
+    "base": "fixtures/policy-snapshot.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "roots",
+          "cwd"
+        ],
+        "value": "src/parser"
+      }
+    ]
+  },
+  {
+    "name": "J12 roots.cwd is omitted rather than empty at the workspace root",
+    "schema": "policy-snapshot",
+    "base": "fixtures/policy-snapshot.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "roots",
+          "cwd"
+        ],
+        "value": ""
+      }
+    ]
+  },
+  {
+    "name": "J12 a byte roots.cwd uses the base64 form",
+    "schema": "policy-snapshot",
+    "base": "fixtures/policy-snapshot.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "roots",
+          "cwd"
+        ],
+        "value": {
+          "encoding": "base64",
+          "data": "/w=="
+        }
+      }
+    ]
+  },
+  {
+    "name": "J12 a vault credential binds its placeholder under env",
+    "schema": "policy-snapshot",
+    "base": "fixtures/policy-snapshot.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "launch"
+        ],
+        "value": {
+          "state_var": "CLAUDE_CONFIG_DIR",
+          "home_is_state": false,
+          "state_subdirs": [],
+          "credentials": [
+            {
+              "dest": ".vault-claude-oauth",
+              "id": "claude-oauth",
+              "mode": "vault",
+              "source": "/home/u/.config/ukai/credentials/claude-oauth",
+              "vault": {
+                "allow_plaintext": false,
+                "binaries": [
+                  "/home/u/.local/share/claude/versions/2.1.295"
+                ],
+                "env": "CLAUDE_CODE_OAUTH_TOKEN",
+                "header": {
+                  "name": "authorization",
+                  "prefix": "Bearer "
+                },
+                "hosts": [
+                  "https://api.anthropic.com"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "J12 a vault env is an environment name",
+    "schema": "policy-snapshot",
+    "base": "fixtures/policy-snapshot.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "launch"
+        ],
+        "value": {
+          "state_var": "CLAUDE_CONFIG_DIR",
+          "home_is_state": false,
+          "state_subdirs": [],
+          "credentials": [
+            {
+              "dest": ".vault-claude-oauth",
+              "id": "claude-oauth",
+              "mode": "vault",
+              "source": "/home/u/.config/ukai/credentials/claude-oauth",
+              "vault": {
+                "allow_plaintext": false,
+                "binaries": [
+                  "/home/u/.local/share/claude/versions/2.1.295"
+                ],
+                "env": "1BAD=NAME",
+                "header": {
+                  "name": "authorization",
+                  "prefix": "Bearer "
+                },
+                "hosts": [
+                  "https://api.anthropic.com"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
   }
 ]

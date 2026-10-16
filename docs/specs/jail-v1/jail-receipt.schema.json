@@ -122,7 +122,11 @@
                 "$ref": "#/$defs/native_string"
               },
               "by": {
-                "const": "operator"
+                "description": "Who made the grant: the operator, or J12's program resolution (a read-only install root `--from-path` derived).",
+                "enum": [
+                  "operator",
+                  "program_resolution"
+                ]
               }
             },
             "required": [

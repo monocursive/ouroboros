@@ -792,6 +792,16 @@ pub fn source_chain(path: &[u8]) -> Result<Vec<(u64, u64)>, SourceRefusal> {
     Ok(chain)
 }
 
+/// J12 `credentials_one_of`: whether a source is absent, its file or a
+/// directory on its path not existing. Every other outcome is not absence,
+/// whether the source exists or the walk refuses it for another reason (a
+/// symlink, a foreign owner): staging judges those as it always has, so an
+/// unsafe source is refused, never skipped in favour of the next one.
+#[must_use]
+pub fn source_absent(path: &[u8]) -> bool {
+    matches!(walk_to_source(path), Err(refusal) if refusal.reason == "source_missing")
+}
+
 /// Where a no-follow walk to a source ended.
 struct Walked {
     /// The directory holding the final component.

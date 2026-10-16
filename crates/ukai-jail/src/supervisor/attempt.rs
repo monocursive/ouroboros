@@ -278,6 +278,18 @@ impl<'a> Attempt<'a> {
                 // The staged objects, bound by descriptor.
                 launch,
                 proxy: proxy.clone(),
+                // J12: the install roots, bound by the handles resolution
+                // pinned them with.
+                pinned_roots: self
+                    .plan
+                    .program
+                    .iter()
+                    .flat_map(crate::program::Program::roots)
+                    .map(|root| crate::platform::PinnedRoot {
+                        path: root.path.clone(),
+                        handle: std::sync::Arc::clone(&root.handle),
+                    })
+                    .collect(),
             },
             Sinks {
                 trace: Some(Arc::clone(&self.journal.trace)),
@@ -397,6 +409,15 @@ impl<'a> Attempt<'a> {
                 &[&self.plan.data_dir, &self.plan.config_dir],
                 self.attempt_id.as_str(),
             )?);
+        }
+        // J12 §3.3 step 3: the last check before release. The resolved
+        // program is walked to again under the install root's own handle,
+        // the object the boundary binds, and by its path; a swap since
+        // resolution refuses instead of running another file.
+        if let Some(program) = &self.plan.program {
+            program
+                .recheck()
+                .map_err(|error| error.in_stage(ErrorStage::Prepared))?;
         }
         Ok(())
     }

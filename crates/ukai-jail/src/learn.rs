@@ -266,6 +266,11 @@ fn exact_host_object(path: &Path) -> bool {
 }
 
 pub fn run(ctx: &Context, mut args: LearnArgs) -> Result<i32, String> {
+    // J12: `--from-path` derives argv and grants for `run`; a learning run
+    // names its program explicitly.
+    if args.policy.selection.from_path {
+        return Err("learn does not take --from-path; pass the program after `--`".into());
+    }
     if args.policy.observe == Some(crate::cli::Observe::Off)
         || args.policy.evidence == Some(crate::cli::Evidence::BestEffort)
     {

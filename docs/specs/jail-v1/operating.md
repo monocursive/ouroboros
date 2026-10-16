@@ -112,7 +112,8 @@ systemd-run --user --scope --quiet ukai-jail run -- make test
 ## Commands
 
 ```text
-ukai-jail run [--profile agent|tool|build|none|FILE] [--launch NAME]
+ukai-jail NAME [ARG]...
+ukai-jail run [--profile agent|tool|build|none|FILE] [--launch NAME [--from-path]]
   [--workspace PATH] [--scratch PATH] [--rw PATH]... [--ro PATH]...
   [--deny-read PATH]... [--allow-host HOST[:PORT]]... [--limit KEY=VALUE]...
   [--observe on|off] [--evidence strict|best-effort]
@@ -120,11 +121,37 @@ ukai-jail run [--profile agent|tool|build|none|FILE] [--launch NAME]
   [--attempt-id ID] [--label-only] [--quiet] [-- PROGRAM [ARG]...]
 ukai-jail tail [--attempt ID] [--follow] [--json] [--since TIME]
 ukai-jail tail --summary [--attempt ID] [--json]
-ukai-jail explain [--profile …] [--launch NAME] [the run overrides] [--json]
-ukai-jail doctor [--profile NAME|FILE] [--launch NAME] [--json]
+ukai-jail explain [--profile …] [--launch NAME [--from-path]] [the run overrides] [--json]
+ukai-jail doctor [--profile NAME|FILE] [--launch NAME [--from-path]] [--json]
+ukai-jail credential set [--force] ID
+ukai-jail credential rm ID
 ukai-jail gc [--dry-run] [--json]
 ukai-jail version [--json]
 ```
+
+- **`ukai-jail NAME [ARG]...`** is exactly `ukai-jail run --launch NAME
+  --from-path -- ARG...`: the same policy and argv digests. Every word after
+  `NAME` is the agent's, so an agent flag is never taken for a jail flag; use
+  the long form to add jail options. Built-in verbs (`run`, `tail`, `learn`,
+  `explain`, `doctor`, `gc`, `version`, `help`, `credential`) win, so a launch
+  profile named like one is reachable only through `run --launch`, and
+  `doctor --launch` says so. A word that is neither exits 2 naming both
+  readings (`no verb or launch profile `claud``).
+- **`--from-path`** (with `--launch NAME`) turns on the zero-config defaults
+  of [Zero-config launch](#zero-config-launch---from-path). It refuses
+  `--gate-fd`, `--attempt-id` and `--profile none` (exit 2): an owner
+  computes its own plan, and `none` has nothing to bound.
+- **A workspace that is `/`, your home directory or an ancestor of it is
+  refused on every contained run** (`agent`, `tool`, `build`), however it
+  was chosen: `--workspace`, the invocation directory, or `--from-path`
+  discovery (`policy_widening`, key `--workspace`, exit 125). Your home holds
+  your shell start-up files, SSH keys and agent credentials. Run from a
+  project directory or pass `--workspace`; there is no flag to bypass it
+  (`--profile none`, which grants no workspace, is unaffected). "Home" is both
+  `HOME` and the user database's entry for your uid.
+- **The child starts where you stood** when that is beneath the workspace
+  (`roots.cwd` in the policy snapshot, so it is in the digest), and at the
+  workspace root otherwise.
 
 - **`run`** prepares the boundary, attaches the observer, writes a prepared
   receipt, releases the command, waits for it, ends and verifies its whole
@@ -335,13 +362,45 @@ hosts = ["https://api.anthropic.com"]
 header = { name = "x-api-key" }
 ```
 
-The child receives `UKAI_VAULT_ANTHROPIC`, an attempt-scoped placeholder.
-Map it to the client's expected variable inside the contained command, for
-example `/bin/sh -c 'export ANTHROPIC_API_KEY="$UKAI_VAULT_ANTHROPIC";
-exec claude "$@"' vault-client -p '…'`. Review the binary/library read-only
+The child receives `UKAI_VAULT_ANTHROPIC`, an attempt-scoped placeholder,
+or, with `env = "ANTHROPIC_API_KEY"`, the same placeholder under that name
+and no `UKAI_VAULT_*` name, so no `/bin/sh -c` wrapper is needed. `env` is
+checked like every launch-profile name (no `LD_*`, `UKAI_*`, proxy, runtime
+control or generated name) and must not repeat another binding, the state
+variable or another credential's `env`. Review the binary/library read-only
 grants for your installation as for any launch profile. The source remains
 outside those grants. An `authorization` placement with `prefix = "Bearer "`
 supports clients sending bearer tokens.
+
+Further launch-profile keys (J12):
+
+- `source = "@config/credentials/ID"` resolves against the config directory,
+  so a moved `UKAI_CONFIG_DIR` and `ukai-jail credential set ID` agree.
+- `binaries = ["@program"]` binds the credential to the program
+  `--from-path` resolved (after `#!/usr/bin/env X`, to `X`, so any script
+  that interpreter runs could present it; `doctor` says so). Without
+  `--from-path` it binds an absolute `PROGRAM` after `--`, and a run with a
+  relative one refuses naming the key. A `#!` script run by a system
+  interpreter refuses: its connections come from the interpreter.
+- `hint = "…"` (printable, at most 512 bytes) tells how to provide a source;
+  `doctor --launch` prints it for a missing one, and so does the refusal
+  below.
+- `credentials_one_of = ["a", "b"]` stages the first listed credential whose
+  source exists and skips the rest; the receipt lists only the staged one,
+  and the provenance each skipped id. Only absence counts as absent (the
+  file, or a directory on its path, does not exist): a source that exists but
+  is unsafe (a wrong mode or owner, a second link, a symlink) still refuses,
+  never falling through to the next. None present refuses before anything is
+  prepared (`credential_unavailable`), listing every id with its hint.
+- `program_root = N` (1 to 4, default 1) is how many levels above the real
+  program file `--from-path` grants read-only.
+
+The bundled `claude` profile uses all of them: a `claude setup-token` value
+(`claude-oauth`, `CLAUDE_CODE_OAUTH_TOKEN`, sent as `Authorization: Bearer`,
+[measured](../../benchmarks/jail/claude-setup-token-spike-2026-10-16.md) for
+Claude Code 2.1.295) first, then a Console API key (`anthropic`,
+`ANTHROPIC_API_KEY`, `x-api-key`), both bound to the resolved `claude` and
+only for `https://api.anthropic.com`. It stages nothing from `~/.claude`.
 
 HTTPS vaulting installs a public per-attempt CA through conventional trust
 variables, verifies the upstream certificate and hostname before substitution,
@@ -422,6 +481,87 @@ request per connection: pipelined bytes are counted and discarded. Chunked
 uploads, `Expect`, HTTP/2 and certificate-pinning clients remain unsupported.
 The [before/after credential benchmark](../../benchmarks/credentials/2026-10-13/README.md)
 retains the previous transport limitations as historical evidence.
+
+## Zero-config launch (`--from-path`)
+
+`ukai-jail claude -p "…"` from inside a git repository is the whole command.
+With `--from-path` (which the alias implies):
+
+- **The workspace** is the nearest git top level at or above the invocation
+  directory: the first directory holding a `.git` that is a directory with
+  `HEAD`, or a file of at most 4 KiB beginning `gitdir: ` (a linked worktree
+  or a submodule). The walk opens every directory with no symlink followed
+  and stops where the device changes, as git does by default. The jail never
+  runs `git` for this: a repository's own configuration can make `git` run
+  commands with your authority. Outside a repository it refuses
+  (`invalid_config`, key `--workspace`); `--workspace` still chooses. In a
+  linked worktree or a submodule the common git directory stays outside the
+  workspace, so git commands inside fail; `doctor` says so.
+- **The program** is the launch name looked up on *your* `PATH` (read by the
+  supervisor, never given to the child): the first absolute entry holding an
+  executable regular file of that name; empty and relative entries are never
+  searched. Symlinks are followed to the real file, which is then pinned by a
+  no-follow walk from `/`: every directory on the way owned by root or you and
+  not writable by others without the sticky bit, and from the install root
+  down nothing group- or other-writable, the file itself included and owned by
+  root or you. Its argv is `[the real path, ARG...]`.
+- **The install root**, `program_root` levels above the real file (launch
+  profile data, default 1: its own directory), is granted read-only and bound
+  from the handle the walk took, so the child sees the directory the program
+  was pinned in. The receipt lists it in `policy.grants` as
+  `{kind: "read_only", value: ROOT, by: "program_resolution"}`, never as
+  `operator`; when a root you already granted covers it (an npm install
+  under `/usr`, or your own `--ro` of it) it is no new grant and is reported
+  as covered. It refuses (`policy_widening`, key `--from-path`, naming the
+  root) when it is `/`, your home or above it; contains the config directory,
+  the data directory or a credential source of the launch; lies inside or
+  contains the workspace, the scratch or any `--rw` root (an agent that could
+  rewrite its own executable would run that code with your authority on your
+  next launch); or overlaps `/proc` or `/sys`.
+- **What it needs to run**: an ELF file needs its loader in the runtime roots;
+  a `#!` interpreter in the runtime roots needs nothing more. `#!/usr/bin/env
+  X` becomes `[X', PROGRAM, ARG...]`, `X` resolved the same way on your `PATH`
+  and its directory granted read-only too, because inside the jail `env` would
+  search the fixed contained `PATH`. Other forms refuse naming the
+  interpreter: options to `env`, several interpreter arguments, a nested
+  script, an interpreter outside the runtime roots
+  (`exec_interpreter_missing` for a missing loader or interpreter).
+- **Before release** the program is walked to again under the install root's
+  own handle and by its path; a file swapped since resolution refuses
+  (`policy_widening`, "identity mismatch") and nothing runs.
+- **Disclosure**: `explain --from-path` prints the program, its argv and every
+  derived root (`--json` adds a `program` object), the provenance names
+  `program-resolution`, and when stderr is a terminal one line precedes exec:
+
+  ```text
+  ukai-jail: claude = /home/u/.local/share/claude/versions/2.1.295 (read-only: /home/u/.local/share/claude/versions)
+  ```
+
+  With stderr a pipe or a file, nothing is added.
+
+A project `ukai.toml` can still deny-read the install root (the agent then
+fails visibly) or shrink the allowed hosts; it cannot add a grant, a host or
+a credential, or select `--from-path`.
+
+### Storing a credential: `ukai-jail credential`
+
+```sh
+claude setup-token                         # browser flow; prints the token
+ukai-jail credential set claude-oauth      # paste it, then Enter and Ctrl-D
+ukai-jail credential rm claude-oauth
+```
+
+`credential set ID` reads one value from stdin (not echoed on a terminal),
+strips one trailing newline and stores it as `<config-dir>/credentials/ID`,
+directory 0700 and file 0600, through a no-follow walk. The value must be 1
+to 8192 printable ASCII bytes; a value with a line break is refused naming
+that cause (a token copied from a wrapped terminal line arrives that way and
+would otherwise fail only when used), never truncated. An existing file is
+replaced only with `--force`, by a checked rename; a symlink, a directory or a
+file someone else owns refuses. The value is never printed and never taken
+from the command line. `credential rm ID` removes the file; a run holding it
+loses it within the vault's 100 ms poll. Exit 0 when done, 1 when refused, 2
+for a malformed id.
 
 ## doctor
 
