@@ -1,0 +1,10 @@
+{
+  "opencode/docker": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      110064.214101
+    ],
+    "median_ms": 110064.214101
+  }
+}

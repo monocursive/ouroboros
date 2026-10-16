@@ -1,0 +1,19 @@
+I'll help you run the tests, find the bug, and fix it. Let me start by creating a task plan and running the tests.
+Now let me run the tests:
+I can see two test failures:
+1. `test_basic`: Expected 'hello' but got 'world' from `first_word('hello world')`
+2. `test_single`: IndexError when trying to access `parts[1]` on a single word
+
+Let me read the source code and test files to understand the bug:
+Perfect! I found the bug. The function `first_word` is using `parts[1]` (index 1) when it should be using `parts[0]` (index 0) to get the first element. This is a classic off-by-one error. 
+
+The bug causes:
+- For 'hello world': returns 'world' (second word) instead of 'hello' (first word)
+- For 'solo': IndexError because there's only one element at index 0
+
+Let me fix this:
+Now let me verify all tests pass:
+Perfect! All tests are now passing. 
+
+**Summary:**
+I found and fixed an off-by-one error in `src/parse.py:4`. The function was using `parts[1]` instead of `parts[0]` to return the first word. This caused it to return the second word instead of the first, and crash when given a single word. The fix was simple - changed the index from 1 to 0.

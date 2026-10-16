@@ -1,0 +1,47 @@
+{
+  "version": "1.0.0",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "/home/ubuntu/bench-ouro-rerun/bin/codex exec --ephemeral --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox --model gpt-6.1-sol -c 'model_reasoning_effort=\"low\"' -C /home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/workspace/inventory-workflow 'Implement category summaries in this inventory CLI. Add --group-by-category to python3 -m inventory.cli. Read the CSV using the existing loader, apply --min-quantity before grouping, and emit a JSON array sorted by category. Each object must have category (string), quantity (sum of quantities), and stock_value (sum of quantity * unit_price as an exact decimal formatted with two fractional digits, a JSON string). Ungrouped output must keep its current behavior. Invalid CSV must produce exit code 2 and a useful stderr message without a traceback. Update README.md with a grouped example and its expected output. Run python3 -m unittest discover -s tests -v and fix failures. Do not change the supplied tests. Keep processing and argument parsing in separate modules.'",
+    "cwd": "/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/workspace/inventory-workflow",
+    "timeout": 240000,
+    "inheritDefaultEnv": true,
+    "env": [
+      "HOME=/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/home",
+      "PATH=/home/ubuntu/bench-ouro-rerun/bin:/home/ubuntu/bench-ouro-rerun/bin:/home/ubuntu/.opencode/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/sbin:/sbin",
+      "TMPDIR=/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/home/tmp",
+      "CODEX_HOME=/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/state",
+      "CLAUDE_CONFIG_DIR=/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/home/.claude",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+      "DISABLE_TELEMETRY=1",
+      "OPENCODE_DISABLE_AUTOUPDATE=true",
+      "XDG_CONFIG_HOME=/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/home/.config",
+      "XDG_DATA_HOME=/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/home/.local/share",
+      "XDG_STATE_HOME=/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/home/.local/state",
+      "XDG_CACHE_HOME=/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/home/.cache",
+      "NODE_EXTRA_CA_CERTS=/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/home/proxy-ca.pem",
+      "SSL_CERT_FILE=/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/home/proxy-ca.pem",
+      "REQUESTS_CA_BUNDLE=/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/home/proxy-ca.pem",
+      "GIT_CONFIG_NOSYSTEM=1",
+      "GIT_CONFIG_GLOBAL=/dev/null"
+    ]
+  },
+  "filesystem": {
+    "readonlyPaths": [
+      "/home/ubuntu/bench-ouro-rerun/bin"
+    ],
+    "readwritePaths": [
+      "/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/workspace/inventory-workflow",
+      "/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/home",
+      "/home/ubuntu/bench-ouro-rerun/results/workflow-v2-rerun/runs/010-codex-mxc-inventory-workflow-0/state"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:43051"
+  }
+}

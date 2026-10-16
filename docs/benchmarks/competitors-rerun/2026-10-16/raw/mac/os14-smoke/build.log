@@ -1,0 +1,112 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load remote build context
+#1 DONE 2.3s
+
+#1 [internal] load remote build context
+#1 DONE 2.3s
+
+#2 copy /context /
+#2 DONE 1.3s
+
+#3 [internal] load metadata for docker.io/library/bench-openshell:latest
+#3 DONE 0.0s
+
+#4 [1/7] FROM docker.io/library/bench-openshell:latest
+#4 DONE 0.1s
+
+#5 [2/7] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*
+#5 0.582 Get:1 http://ports.ubuntu.com/ubuntu-ports noble InRelease [256 kB]
+#5 1.111 Get:2 http://ports.ubuntu.com/ubuntu-ports noble-updates InRelease [126 kB]
+#5 1.243 Get:3 http://ports.ubuntu.com/ubuntu-ports noble-backports InRelease [126 kB]
+#5 1.372 Get:4 http://ports.ubuntu.com/ubuntu-ports noble-security InRelease [126 kB]
+#5 1.532 Get:5 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages [19.0 MB]
+#5 2.843 Get:6 http://ports.ubuntu.com/ubuntu-ports noble/multiverse arm64 Packages [274 kB]
+#5 2.843 Get:7 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages [1776 kB]
+#5 2.880 Get:8 http://ports.ubuntu.com/ubuntu-ports noble/restricted arm64 Packages [113 kB]
+#5 2.883 Get:9 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages [1786 kB]
+#5 2.985 Get:10 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Packages [2214 kB]
+#5 3.141 Get:11 http://ports.ubuntu.com/ubuntu-ports noble-updates/multiverse arm64 Packages [104 kB]
+#5 3.142 Get:12 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages [3251 kB]
+#5 3.425 Get:13 http://ports.ubuntu.com/ubuntu-ports noble-backports/main arm64 Packages [49.0 kB]
+#5 3.426 Get:14 http://ports.ubuntu.com/ubuntu-ports noble-backports/multiverse arm64 Packages [669 B]
+#5 3.426 Get:15 http://ports.ubuntu.com/ubuntu-ports noble-backports/universe arm64 Packages [36.3 kB]
+#5 3.426 Get:16 http://ports.ubuntu.com/ubuntu-ports noble-security/universe arm64 Packages [1638 kB]
+#5 3.464 Get:17 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages [1475 kB]
+#5 3.513 Get:18 http://ports.ubuntu.com/ubuntu-ports noble-security/multiverse arm64 Packages [99.1 kB]
+#5 3.515 Get:19 http://ports.ubuntu.com/ubuntu-ports noble-security/restricted arm64 Packages [3129 kB]
+#5 3.803 Fetched 35.6 MB in 4s (10.1 MB/s)
+#5 3.803 Reading package lists...
+#5 4.327 Reading package lists...
+#5 4.777 Building dependency tree...
+#5 4.886 Reading state information...
+#5 5.009 The following additional packages will be installed:
+#5 5.009   libssl3t64 openssl
+#5 5.045 The following NEW packages will be installed:
+#5 5.045   ca-certificates openssl ripgrep
+#5 5.046 The following packages will be upgraded:
+#5 5.046   libssl3t64
+#5 5.303 1 upgraded, 3 newly installed, 0 to remove and 7 not upgraded.
+#5 5.303 Need to get 4418 kB of archives.
+#5 5.303 After this operation, 7279 kB of additional disk space will be used.
+#5 5.303 Get:1 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 libssl3t64 arm64 3.0.13-0ubuntu3.16 [1838 kB]
+#5 6.256 Get:2 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 openssl arm64 3.0.13-0ubuntu3.16 [985 kB]
+#5 6.298 Get:3 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 ca-certificates all 20260601~24.04.1 [139 kB]
+#5 6.300 Get:4 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 ripgrep arm64 14.1.0-1 [1455 kB]
+#5 6.527 debconf: delaying package configuration, since apt-utils is not installed
+#5 6.543 Fetched 4418 kB in 1s (3298 kB/s)
+#5 6.565 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 11217 files and directories currently installed.)
+#5 6.588 Preparing to unpack .../libssl3t64_3.0.13-0ubuntu3.16_arm64.deb ...
+#5 6.610 Unpacking libssl3t64:arm64 (3.0.13-0ubuntu3.16) over (3.0.13-0ubuntu3.15) ...
+#5 6.689 Setting up libssl3t64:arm64 (3.0.13-0ubuntu3.16) ...
+#5 6.712 Selecting previously unselected package openssl.
+#5 6.712 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 11217 files and directories currently installed.)
+#5 6.715 Preparing to unpack .../openssl_3.0.13-0ubuntu3.16_arm64.deb ...
+#5 6.718 Unpacking openssl (3.0.13-0ubuntu3.16) ...
+#5 6.751 Selecting previously unselected package ca-certificates.
+#5 6.752 Preparing to unpack .../ca-certificates_20260601~24.04.1_all.deb ...
+#5 6.754 Unpacking ca-certificates (20260601~24.04.1) ...
+#5 6.780 Selecting previously unselected package ripgrep.
+#5 6.780 Preparing to unpack .../ripgrep_14.1.0-1_arm64.deb ...
+#5 6.782 Unpacking ripgrep (14.1.0-1) ...
+#5 6.821 Setting up ripgrep (14.1.0-1) ...
+#5 6.827 Setting up openssl (3.0.13-0ubuntu3.16) ...
+#5 6.836 Setting up ca-certificates (20260601~24.04.1) ...
+#5 6.875 debconf: unable to initialize frontend: Dialog
+#5 6.875 debconf: (TERM is not set, so the dialog frontend is not usable.)
+#5 6.875 debconf: falling back to frontend: Readline
+#5 6.878 debconf: unable to initialize frontend: Readline
+#5 6.878 debconf: (This frontend requires a controlling tty.)
+#5 6.878 debconf: falling back to frontend: Teletype
+#5 6.985 Updating certificates in /etc/ssl/certs...
+#5 7.126 rehash: warning: skipping orbstack-root.pem,it does not contain exactly one certificate or CRL
+#5 7.130 122 added, 0 removed; done.
+#5 7.149 Processing triggers for libc-bin (2.39-0ubuntu8.9) ...
+#5 7.303 Processing triggers for ca-certificates (20260601~24.04.1) ...
+#5 7.309 Updating certificates in /etc/ssl/certs...
+#5 7.418 0 added, 0 removed; done.
+#5 7.418 Running hooks in /etc/ca-certificates/update.d...
+#5 7.420 done.
+#5 DONE 8.0s
+
+#6 [3/7] RUN mkdir -p /opt/agents/bin /opt/bench /home/agent /work && chown 1000:1000 /home/agent /work
+#6 DONE 0.1s
+
+#7 [4/7] COPY bin/ /opt/agents/bin/
+#7 DONE 1.3s
+
+#8 [5/7] COPY harness/ /opt/bench/
+#8 DONE 0.1s
+
+#9 [6/7] RUN chmod -R a+rX /opt/agents /opt/bench
+#9 DONE 0.2s
+
+#10 [7/7] WORKDIR /work
+#10 DONE 0.0s
+
+#11 exporting to image
+#11 exporting layers
+#11 exporting layers 1.2s done
+#11 writing image sha256:31ceae765bc8cc59fd00d0fdd8448242203ed268671be9126d61a240b5455cdb done
+#11 naming to docker.io/library/ouro-comparison-agents-v2:20261016 done
+#11 DONE 1.3s

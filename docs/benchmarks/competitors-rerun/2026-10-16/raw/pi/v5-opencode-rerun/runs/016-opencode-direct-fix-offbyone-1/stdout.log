@@ -1,0 +1,16 @@
+I'll help you run the tests, find the bug in src/parse.py, and fix it. Let me start by setting up a task list and running the tests.
+Now let me read the source code and tests to understand the issue:
+I found the bug! In src/parse.py:4, the function is returning `parts[1]` instead of `parts[0]`. This is an off-by-one error:
+
+1. When `text = 'hello world'`, it splits into `['hello', 'world']`, and `parts[1]` returns `'world'` instead of `'hello'`
+2. When `text = 'solo'`, it splits into `['solo']`, and `parts[1]` causes an IndexError because there's no element at index 1
+
+The fix is to change `parts[1]` to `parts[0]` to get the first element:
+Now let me verify all tests pass:
+Perfect! I found and fixed the bug in src/parse.py:4. The issue was an off-by-one error where the function was returning `parts[1]` instead of `parts[0]`. 
+
+The bug caused:
+- `first_word('hello world')` to return `'world'` instead of `'hello'`
+- `first_word('solo')` to crash with an IndexError
+
+After changing `parts[1]` to `parts[0]`, all tests now pass successfully.

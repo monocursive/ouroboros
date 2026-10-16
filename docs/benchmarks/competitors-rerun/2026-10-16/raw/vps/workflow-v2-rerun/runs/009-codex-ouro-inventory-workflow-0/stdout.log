@@ -1,0 +1,5 @@
+Implemented `--group-by-category` with filtering before grouping, sorted category summaries, and exact decimal totals formatted as JSON strings with two fractional digits.
+
+Updated README with an example and expected output. Invalid CSV returns exit code 2 without a traceback. Processing remains separate from argument parsing, and supplied tests are unchanged.
+
+All 10 tests pass with `python3 -m unittest discover -s tests -v`.

@@ -1,0 +1,42 @@
+I'll implement category summaries in the inventory CLI. Let me start by exploring the codebase structure and then plan the implementation.
+Now let me plan and implement this feature:
+Let me update the CLI to add the --group-by-category argument:
+Now let me implement the category_report function in the report module:
+Now let me update the README with a grouped example:
+Now let me run the tests:
+Perfect! All tests pass. Let me verify the implementation works as expected with the example CSV:
+Perfect! I've successfully implemented the category summaries feature for the inventory CLI. Here's what was done:
+
+## Summary
+
+**All tests passing** ✓ (10/10 tests)
+
+### Changes Made:
+
+1. **inventory/cli.py**:
+   - Added `--group-by-category` argument to the CLI
+   - Imported `category_report` function
+   - Added conditional logic to call either `item_report` or `category_report` based on the flag
+   - Existing error handling already provides exit code 2 for invalid CSV with stderr messages (no traceback)
+
+2. **inventory/report.py**:
+   - Created new `category_report()` function that:
+     - Filters items by `--min-quantity` BEFORE grouping
+     - Groups items by category
+     - Calculates total quantity (sum of quantities)
+     - Calculates total stock_value (sum of quantity * unit_price)
+     - Formats stock_value as a decimal string with exactly 2 fractional digits
+     - Returns a JSON array sorted alphabetically by category name
+
+3. **README.md**:
+   - Added "Grouped Category Summary" section
+   - Included example command and expected JSON output
+   - Noted that `--min-quantity` filter is applied before grouping
+
+### Verification:
+
+- Ungrouped output maintains current behavior: `inventory/cli.py:14`
+- Grouped output produces sorted JSON with category summaries: `inventory/report.py:7`
+- Invalid CSV produces exit code 2 with useful error message (no traceback): `inventory/cli.py:16-17`
+- Processing logic separated in `report.py`, argument parsing in `cli.py`
+- All 10 existing tests pass without modification

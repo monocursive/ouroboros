@@ -1,0 +1,20 @@
+I'll help you fix the failing tests. Let me start by creating a task plan and then running the tests to see what's failing.
+Now let me run the tests to see what's failing:
+I can see the issues clearly:
+1. `test_basic` expects 'hello' but gets 'world' - the function is returning the wrong element
+2. `test_single` gets an IndexError when trying to access `parts[1]` with a single word
+
+Let me examine the source code and tests to understand the expected behavior:
+Perfect! I found the bug. The issue is a classic off-by-one error in src/parse.py:4. The function is trying to return `parts[1]` (the second element) when it should return `parts[0]` (the first element). This is why:
+- 'hello world' returns 'world' instead of 'hello'
+- 'solo' causes an IndexError (there's no index 1 when the list only has one element)
+
+Let me fix this:
+Now let me verify that all tests pass:
+Perfect! All tests are now passing. 
+
+The bug was an off-by-one error in src/parse.py:4. The function was returning `parts[1]` (the second element) instead of `parts[0]` (the first element). This caused:
+- `first_word('hello world')` to return 'world' instead of 'hello'
+- `first_word('solo')` to throw an IndexError
+
+The fix was simple: change `return parts[1]` to `return parts[0]`. All tests now pass successfully.

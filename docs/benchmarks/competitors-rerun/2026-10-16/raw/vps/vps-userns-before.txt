@@ -1,0 +1,2 @@
+kernel.apparmor_restrict_unprivileged_userns = 1
+kernel.apparmor_restrict_unprivileged_userns = 0

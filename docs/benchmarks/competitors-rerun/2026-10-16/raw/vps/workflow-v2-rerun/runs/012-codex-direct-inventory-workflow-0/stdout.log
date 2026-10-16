@@ -1,0 +1,5 @@
+Implemented `--group-by-category` with filtering before grouping, category sorting, and exact decimal totals formatted as two-digit JSON strings.
+
+Preserved ungrouped behavior and separate parsing/reporting modules. Improved invalid CSV errors and added a README example with verified output. Supplied tests unchanged.
+
+All 10 tests pass with `python3 -m unittest discover -s tests -v`.

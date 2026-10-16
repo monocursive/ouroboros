@@ -1,0 +1,18 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/home/ubuntu/bench-ouro-rerun/bin"
+    ],
+    "allowWrite": [
+      "/home/ubuntu/bench-ouro-rerun/results/v5-claude-rerun/runs/007-claude-greywall-fix-offbyone-0/workspace/fix-offbyone",
+      "/home/ubuntu/bench-ouro-rerun/results/v5-claude-rerun/runs/007-claude-greywall-fix-offbyone-0/home",
+      "/home/ubuntu/bench-ouro-rerun/results/v5-claude-rerun/runs/007-claude-greywall-fix-offbyone-0/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43052",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

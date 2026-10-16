@@ -1,0 +1,868 @@
+{
+  "performance": {
+    "available": {
+      "direct": true,
+      "ouro-jail": true,
+      "ouro-obs-off": false,
+      "greywall": true,
+      "mxc": true
+    },
+    "case_available": [
+      [
+        "direct",
+        "cpu"
+      ],
+      [
+        "direct",
+        "git"
+      ],
+      [
+        "direct",
+        "noop"
+      ],
+      [
+        "direct",
+        "python"
+      ],
+      [
+        "direct",
+        "reads"
+      ],
+      [
+        "direct",
+        "spawn"
+      ],
+      [
+        "direct",
+        "writes"
+      ],
+      [
+        "greywall",
+        "cpu"
+      ],
+      [
+        "greywall",
+        "git"
+      ],
+      [
+        "greywall",
+        "noop"
+      ],
+      [
+        "greywall",
+        "python"
+      ],
+      [
+        "greywall",
+        "reads"
+      ],
+      [
+        "greywall",
+        "spawn"
+      ],
+      [
+        "greywall",
+        "writes"
+      ],
+      [
+        "mxc",
+        "cpu"
+      ],
+      [
+        "mxc",
+        "git"
+      ],
+      [
+        "mxc",
+        "noop"
+      ],
+      [
+        "mxc",
+        "python"
+      ],
+      [
+        "mxc",
+        "reads"
+      ],
+      [
+        "mxc",
+        "spawn"
+      ],
+      [
+        "mxc",
+        "writes"
+      ],
+      [
+        "ouro-jail",
+        "cpu"
+      ],
+      [
+        "ouro-jail",
+        "git"
+      ],
+      [
+        "ouro-jail",
+        "noop"
+      ],
+      [
+        "ouro-jail",
+        "python"
+      ],
+      [
+        "ouro-jail",
+        "reads"
+      ],
+      [
+        "ouro-jail",
+        "spawn"
+      ],
+      [
+        "ouro-jail",
+        "writes"
+      ],
+      [
+        "ouro-obs-off",
+        "cpu"
+      ],
+      [
+        "ouro-obs-off",
+        "git"
+      ],
+      [
+        "ouro-obs-off",
+        "python"
+      ],
+      [
+        "ouro-obs-off",
+        "reads"
+      ],
+      [
+        "ouro-obs-off",
+        "spawn"
+      ],
+      [
+        "ouro-obs-off",
+        "writes"
+      ]
+    ],
+    "invalid_sequences": [],
+    "reference": {
+      "noop": {
+        "workload": "noop",
+        "count": 1,
+        "checksum": 0
+      },
+      "python": {
+        "workload": "python",
+        "count": 1,
+        "checksum": 0
+      },
+      "git": {
+        "workload": "git",
+        "count": 1003,
+        "checksum": "c7daa5d1c7985955db91200781f171ab3a66a5a1ace3358a9fcdc54e513383aa"
+      },
+      "reads": {
+        "workload": "reads",
+        "count": 1000,
+        "checksum": 491520000
+      },
+      "writes": {
+        "workload": "writes",
+        "count": 1000,
+        "checksum": 1024000
+      },
+      "spawn": {
+        "workload": "spawn",
+        "count": 100,
+        "checksum": 0
+      },
+      "cpu": {
+        "workload": "cpu",
+        "count": 20000000,
+        "checksum": 15910230868747444993
+      }
+    }
+  },
+  "safety": [
+    {
+      "tool": "direct",
+      "probe": "private_read",
+      "sequence": 1170,
+      "status": "allowed",
+      "detail": {
+        "probe": "read",
+        "allowed": true,
+        "bytes": 20
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "private_write",
+      "sequence": 1171,
+      "status": "allowed",
+      "detail": {
+        "probe": "write",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "readonly_write",
+      "sequence": 1172,
+      "status": "allowed",
+      "detail": {
+        "probe": "write",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "symlink_read",
+      "sequence": 1173,
+      "status": "allowed",
+      "detail": {
+        "probe": "read",
+        "allowed": true,
+        "bytes": 20
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "symlink_write",
+      "sequence": 1174,
+      "status": "allowed",
+      "detail": {
+        "probe": "write",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "hardlink_read",
+      "sequence": 1175,
+      "status": "allowed",
+      "detail": {
+        "probe": "link",
+        "allowed": true,
+        "bytes": 20
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "host_tcp",
+      "sequence": 1176,
+      "status": "allowed",
+      "detail": {
+        "probe": "tcp",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "host_unix_socket",
+      "sequence": 1177,
+      "status": "allowed",
+      "detail": {
+        "probe": "unix",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "host_signal",
+      "sequence": 1178,
+      "status": "allowed",
+      "detail": {
+        "probe": "signal",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "detached_after_root_exit",
+      "sequence": 1179,
+      "status": "survived",
+      "bytes_at_return": 16,
+      "bytes_after_300ms": 112
+    },
+    {
+      "tool": "direct",
+      "probe": "syscall_surface",
+      "sequence": 1180,
+      "status": "observed",
+      "records": [
+        {
+          "syscall": "unshare_userns",
+          "return": 0,
+          "errno": 0
+        },
+        {
+          "syscall": "ptrace_traceme",
+          "return": 0,
+          "errno": 0
+        },
+        {
+          "syscall": "mount",
+          "return": -1,
+          "errno": 14
+        },
+        {
+          "syscall": "clone3",
+          "return": -1,
+          "errno": 22
+        },
+        {
+          "syscall": "process_vm_readv",
+          "return": 0,
+          "errno": 0
+        },
+        {
+          "syscall": "pidfd_getfd",
+          "return": -1,
+          "errno": 9
+        },
+        {
+          "syscall": "io_uring_setup",
+          "return": -1,
+          "errno": 14
+        },
+        {
+          "syscall": "bpf",
+          "return": -1,
+          "errno": 22
+        },
+        {
+          "syscall": "keyctl",
+          "return": -1,
+          "errno": 95
+        },
+        {
+          "syscall": "setns",
+          "return": -1,
+          "errno": 9
+        }
+      ]
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "private_read",
+      "sequence": 1181,
+      "status": "denied",
+      "detail": {
+        "probe": "read",
+        "allowed": false,
+        "errno": 2,
+        "error": "[Errno 2] No such file or directory: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/private/denied/read-canary'"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "private_write",
+      "sequence": 1182,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/private/write-canary'"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "readonly_write",
+      "sequence": 1183,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/private/read-only'"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "symlink_read",
+      "sequence": 1184,
+      "status": "denied",
+      "detail": {
+        "probe": "read",
+        "allowed": false,
+        "errno": 2,
+        "error": "[Errno 2] No such file or directory: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/work/read-link'"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "symlink_write",
+      "sequence": 1185,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/work/write-link'"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "hardlink_read",
+      "sequence": 1186,
+      "status": "denied",
+      "detail": {
+        "probe": "link",
+        "allowed": false,
+        "errno": 2,
+        "error": "[Errno 2] No such file or directory: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/private/denied/read-canary' -> '/home/monocursive/bench-ouro-rerun/runs/pi-perf/work/link-copy'"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "host_tcp",
+      "sequence": 1187,
+      "status": "denied",
+      "detail": {
+        "probe": "tcp",
+        "allowed": false,
+        "errno": 111,
+        "error": "[Errno 111] Connection refused"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "host_unix_socket",
+      "sequence": 1188,
+      "status": "denied",
+      "detail": {
+        "probe": "unix",
+        "allowed": false,
+        "errno": 1,
+        "error": "[Errno 1] Operation not permitted"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "host_signal",
+      "sequence": 1189,
+      "status": "denied",
+      "detail": {
+        "probe": "signal",
+        "allowed": false,
+        "errno": 3,
+        "error": "[Errno 3] No such process"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "detached_after_root_exit",
+      "sequence": 1190,
+      "status": "stopped",
+      "bytes_at_return": 16,
+      "bytes_after_300ms": 16
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "syscall_surface",
+      "sequence": 1191,
+      "status": "observed",
+      "records": [
+        {
+          "syscall": "unshare_userns",
+          "return": -1,
+          "errno": 1
+        },
+        {
+          "syscall": "ptrace_traceme",
+          "return": -1,
+          "errno": 1
+        },
+        {
+          "syscall": "mount",
+          "return": -1,
+          "errno": 1
+        },
+        {
+          "syscall": "clone3",
+          "return": -1,
+          "errno": 38
+        },
+        {
+          "syscall": "process_vm_readv",
+          "return": -1,
+          "errno": 1
+        },
+        {
+          "syscall": "pidfd_getfd",
+          "return": -1,
+          "errno": 1
+        },
+        {
+          "syscall": "io_uring_setup",
+          "return": -1,
+          "errno": 1
+        },
+        {
+          "syscall": "bpf",
+          "return": -1,
+          "errno": 1
+        },
+        {
+          "syscall": "keyctl",
+          "return": -1,
+          "errno": 1
+        },
+        {
+          "syscall": "setns",
+          "return": -1,
+          "errno": 1
+        }
+      ]
+    },
+    {
+      "tool": "ouro-obs-off",
+      "status": "unavailable"
+    },
+    {
+      "tool": "greywall",
+      "probe": "private_read",
+      "sequence": 1192,
+      "status": "allowed",
+      "detail": {
+        "probe": "read",
+        "allowed": true,
+        "bytes": 20
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "private_write",
+      "sequence": 1193,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/private/write-canary'"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "readonly_write",
+      "sequence": 1194,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/private/read-only'"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "symlink_read",
+      "sequence": 1195,
+      "status": "allowed",
+      "detail": {
+        "probe": "read",
+        "allowed": true,
+        "bytes": 20
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "symlink_write",
+      "sequence": 1196,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/work/write-link'"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "hardlink_read",
+      "sequence": 1197,
+      "status": "denied",
+      "detail": {
+        "probe": "link",
+        "allowed": false,
+        "errno": 18,
+        "error": "[Errno 18] Invalid cross-device link: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/private/denied/read-canary' -> '/home/monocursive/bench-ouro-rerun/runs/pi-perf/work/link-copy'"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "host_tcp",
+      "sequence": 1198,
+      "status": "denied",
+      "detail": {
+        "probe": "tcp",
+        "allowed": false,
+        "errno": 111,
+        "error": "[Errno 111] Connection refused"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "host_unix_socket",
+      "sequence": 1199,
+      "status": "allowed",
+      "detail": {
+        "probe": "unix",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "host_signal",
+      "sequence": 1200,
+      "status": "denied",
+      "detail": {
+        "probe": "signal",
+        "allowed": false,
+        "errno": 3,
+        "error": "[Errno 3] No such process"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "detached_after_root_exit",
+      "sequence": 1201,
+      "status": "stopped",
+      "bytes_at_return": 16,
+      "bytes_after_300ms": 16
+    },
+    {
+      "tool": "greywall",
+      "probe": "syscall_surface",
+      "sequence": 1202,
+      "status": "observed",
+      "records": [
+        {
+          "syscall": "unshare_userns",
+          "return": 0,
+          "errno": 0
+        },
+        {
+          "syscall": "ptrace_traceme",
+          "return": -1,
+          "errno": 1
+        },
+        {
+          "syscall": "mount",
+          "return": -1,
+          "errno": 1
+        },
+        {
+          "syscall": "clone3",
+          "return": -1,
+          "errno": 22
+        },
+        {
+          "syscall": "process_vm_readv",
+          "return": -1,
+          "errno": 1
+        },
+        {
+          "syscall": "pidfd_getfd",
+          "return": -1,
+          "errno": 9
+        },
+        {
+          "syscall": "io_uring_setup",
+          "return": -1,
+          "errno": 14
+        },
+        {
+          "syscall": "bpf",
+          "return": -1,
+          "errno": 1
+        },
+        {
+          "syscall": "keyctl",
+          "return": -1,
+          "errno": 1
+        },
+        {
+          "syscall": "setns",
+          "return": -1,
+          "errno": 9
+        }
+      ]
+    },
+    {
+      "tool": "mxc",
+      "probe": "private_read",
+      "sequence": 1203,
+      "status": "denied",
+      "detail": {
+        "probe": "read",
+        "allowed": false,
+        "errno": 2,
+        "error": "[Errno 2] No such file or directory: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/private/denied/read-canary'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "private_write",
+      "sequence": 1204,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/private/write-canary'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "readonly_write",
+      "sequence": 1205,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/private/read-only'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "symlink_read",
+      "sequence": 1206,
+      "status": "denied",
+      "detail": {
+        "probe": "read",
+        "allowed": false,
+        "errno": 2,
+        "error": "[Errno 2] No such file or directory: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/work/read-link'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "symlink_write",
+      "sequence": 1207,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/work/write-link'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "hardlink_read",
+      "sequence": 1208,
+      "status": "denied",
+      "detail": {
+        "probe": "link",
+        "allowed": false,
+        "errno": 2,
+        "error": "[Errno 2] No such file or directory: '/home/monocursive/bench-ouro-rerun/runs/pi-perf/private/denied/read-canary' -> '/home/monocursive/bench-ouro-rerun/runs/pi-perf/work/link-copy'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "host_tcp",
+      "sequence": 1209,
+      "status": "denied",
+      "detail": {
+        "probe": "tcp",
+        "allowed": false,
+        "errno": 111,
+        "error": "[Errno 111] Connection refused"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "host_unix_socket",
+      "sequence": 1210,
+      "status": "allowed",
+      "detail": {
+        "probe": "unix",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "host_signal",
+      "sequence": 1211,
+      "status": "denied",
+      "detail": {
+        "probe": "signal",
+        "allowed": false,
+        "errno": 3,
+        "error": "[Errno 3] No such process"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "detached_after_root_exit",
+      "sequence": 1212,
+      "status": "stopped",
+      "bytes_at_return": 16,
+      "bytes_after_300ms": 16
+    },
+    {
+      "tool": "mxc",
+      "probe": "syscall_surface",
+      "sequence": 1213,
+      "status": "observed",
+      "records": [
+        {
+          "syscall": "unshare_userns",
+          "return": 0,
+          "errno": 0
+        },
+        {
+          "syscall": "ptrace_traceme",
+          "return": 0,
+          "errno": 0
+        },
+        {
+          "syscall": "mount",
+          "return": -1,
+          "errno": 14
+        },
+        {
+          "syscall": "clone3",
+          "return": -1,
+          "errno": 22
+        },
+        {
+          "syscall": "process_vm_readv",
+          "return": 0,
+          "errno": 0
+        },
+        {
+          "syscall": "pidfd_getfd",
+          "return": -1,
+          "errno": 9
+        },
+        {
+          "syscall": "io_uring_setup",
+          "return": -1,
+          "errno": 14
+        },
+        {
+          "syscall": "bpf",
+          "return": -1,
+          "errno": 22
+        },
+        {
+          "syscall": "keyctl",
+          "return": -1,
+          "errno": 95
+        },
+        {
+          "syscall": "setns",
+          "return": -1,
+          "errno": 9
+        }
+      ]
+    }
+  ]
+}

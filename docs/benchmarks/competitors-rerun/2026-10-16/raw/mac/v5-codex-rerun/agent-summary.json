@@ -1,0 +1,27 @@
+{
+  "codex/direct": {
+    "runs": 6,
+    "success": 6,
+    "times_ms": [
+      16099.593292,
+      16106.017209,
+      14675.233208,
+      13696.449333,
+      16321.461917,
+      14653.37925
+    ],
+    "median_ms": 15387.41325
+  },
+  "codex/greywall": {
+    "runs": 6,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "codex/mxc": {
+    "runs": 6,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  }
+}

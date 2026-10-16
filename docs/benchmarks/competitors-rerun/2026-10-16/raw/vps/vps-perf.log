@@ -1,0 +1,195 @@
+preflight direct available 0 
+preflight ouro-jail available 0 
+preflight ouro-obs-off unavailable 1 ukai-jail: error exec_unconfirmed at running [configuration]: with observation off the target's exec could not be confirmed: it ended before the supervisor saw its new image, so whether it ran is unknown; run with --observe on to confirm it
+
+preflight greywall available 0 
+preflight mxc available 0 
+case-preflight ouro-obs-off noop unavailable 1 ing [configuration]: with observation off the target's exec could not be confirmed: it ended before the supervisor saw its new image, so whether it ran is unknown; run with --observe on to confirm it
+
+case-preflight ouro-obs-off reads unavailable 1 ing [configuration]: with observation off the target's exec could not be confirmed: it ended before the supervisor saw its new image, so whether it ran is unknown; run with --observe on to confirm it
+
+round -3 complete
+round -2 complete
+round -1 complete
+round 0 complete
+round 1 complete
+round 2 complete
+round 3 complete
+round 4 complete
+round 5 complete
+round 6 complete
+round 7 complete
+round 8 complete
+round 9 complete
+round 10 complete
+round 11 complete
+round 12 complete
+round 13 complete
+round 14 complete
+round 15 complete
+round 16 complete
+round 17 complete
+round 18 complete
+round 19 complete
+round 20 complete
+round 21 complete
+round 22 complete
+round 23 complete
+round 24 complete
+round 25 complete
+round 26 complete
+round 27 complete
+round 28 complete
+round 29 complete
+safety direct complete
+safety ouro-jail complete
+safety greywall complete
+safety mxc complete
+{
+  "performance": {
+    "available": {
+      "direct": true,
+      "ouro-jail": true,
+      "ouro-obs-off": false,
+      "greywall": true,
+      "mxc": true
+    },
+    "case_available": [
+      [
+        "direct",
+        "cpu"
+      ],
+      [
+        "direct",
+        "git"
+      ],
+      [
+        "direct",
+        "noop"
+      ],
+      [
+        "direct",
+        "python"
+      ],
+      [
+        "direct",
+        "reads"
+      ],
+      [
+        "direct",
+        "spawn"
+      ],
+      [
+        "direct",
+        "writes"
+      ],
+      [
+        "greywall",
+        "cpu"
+      ],
+      [
+        "greywall",
+        "git"
+      ],
+      [
+        "greywall",
+        "noop"
+      ],
+      [
+        "greywall",
+        "python"
+      ],
+      [
+        "greywall",
+        "reads"
+      ],
+      [
+        "greywall",
+        "spawn"
+      ],
+      [
+        "greywall",
+        "writes"
+      ],
+      [
+        "mxc",
+        "cpu"
+      ],
+      [
+        "mxc",
+        "git"
+      ],
+      [
+        "mxc",
+        "noop"
+      ],
+      [
+        "mxc",
+        "python"
+      ],
+      [
+        "mxc",
+        "reads"
+      ],
+      [
+        "mxc",
+        "spawn"
+      ],
+      [
+        "mxc",
+        "writes"
+      ],
+      [
+        "ouro-jail",
+        "cpu"
+      ],
+      [
+        "ouro-jail",
+        "git"
+      ],
+      [
+        "ouro-jail",
+        "noop"
+      ],
+      [
+        "ouro-jail",
+        "python"
+      ],
+      [
+        "ouro-jail",
+        "reads"
+      ],
+      [
+        "ouro-jail",
+        "spawn"
+      ],
+      [
+        "ouro-jail",
+        "writes"
+      ],
+      [
+        "ouro-obs-off",
+        "cpu"
+      ],
+      [
+        "ouro-obs-off",
+        "git"
+      ],
+      [
+        "ouro-obs-off",
+        "python"
+      ],
+      [
+        "ouro-obs-off",
+        "spawn"
+      ],
+      [
+        "ouro-obs-off",
+        "writes"
+      ]
+    ],
+    "invalid_sequences": [],
+    "reference": {
+      "noop": {
+        "workload": "noop",
+

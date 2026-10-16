@@ -1,0 +1,18 @@
+I'll help you refactor `src/store.py` to use JSON instead of YAML while keeping the same class names and method signatures, and ensuring all tests pass.
+
+Let me start by creating a task plan and then examining the current code and tests.
+Now I'll refactor the `src/store.py` file to use JSON instead of YAML:
+Now let me run the tests to verify everything works:
+Perfect! I've successfully refactored `src/store.py` to use the JSON module instead of YAML. Here's what I changed:
+
+**Changes made to src/store.py:**
+- Replaced `import yaml` with `import json` (line 1)
+- Changed `yaml.dump(data, f)` to `json.dump(data, f)` (line 9)
+- Changed `yaml.safe_load(f)` to `json.load(f)` (line 13)
+
+The refactoring maintains:
+- The same class name: `Store`
+- The same method signatures: `__init__(self, path)`, `save(self, data)`, and `load(self)`
+- Full compatibility with the existing tests
+
+All tests pass successfully, as verified by running `python3 -m unittest discover -s tests -v`.

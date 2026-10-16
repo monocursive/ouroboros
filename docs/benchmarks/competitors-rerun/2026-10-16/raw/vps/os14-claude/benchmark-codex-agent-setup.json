@@ -1,0 +1,30 @@
+[
+  {
+    "exit": 0,
+    "timeout": false,
+    "elapsed_ms": 52.417579,
+    "stdout": "Imported 1 provider profile.\n",
+    "stderr": ""
+  },
+  {
+    "exit": 0,
+    "timeout": false,
+    "elapsed_ms": 72.428142,
+    "stdout": "\u2713 Created provider benchmark-codex-v2\n",
+    "stderr": ""
+  },
+  {
+    "exit": 0,
+    "timeout": false,
+    "elapsed_ms": 52.157985,
+    "stdout": "Provider mutation fd041662-8294-483b-980a-e2bcb892ed95 persisted; no attached sandboxes were selected.\n",
+    "stderr": ""
+  },
+  {
+    "exit": 0,
+    "timeout": false,
+    "elapsed_ms": 51.955054,
+    "stdout": "\u2713 Configured refresh for benchmark-codex-v2 CODEX_AUTH_ACCESS_TOKEN\n",
+    "stderr": ""
+  }
+]

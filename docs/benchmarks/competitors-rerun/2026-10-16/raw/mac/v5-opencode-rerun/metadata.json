@@ -1,0 +1,143 @@
+{
+  "schema": "agent-comparison/2",
+  "host": {
+    "system": "Darwin",
+    "node": "muetdhiver2.home",
+    "release": "27.0.0",
+    "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:20:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6020",
+    "machine": "arm64",
+    "processor": "arm"
+  },
+  "started_utc": "2026-10-16T10:29:26Z",
+  "seed": 20261016,
+  "schedule": [
+    [
+      "opencode",
+      "refactor-yaml-json",
+      0,
+      "direct"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      0,
+      "greywall"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      0,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      0,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      0,
+      "direct"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      0,
+      "greywall"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      0,
+      "greywall"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      0,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      0,
+      "direct"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      1,
+      "greywall"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      1,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      1,
+      "direct"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      1,
+      "greywall"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      1,
+      "direct"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      1,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      1,
+      "greywall"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      1,
+      "direct"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      1,
+      "mxc"
+    ]
+  ],
+  "codex_model": "gpt-6.1-sol",
+  "anthropic_model": "claude-sonnet-4-5",
+  "wall_seconds": 180,
+  "bins": {
+    "opencode": {
+      "sha256": "476151a6c8b56e084d223d71a9312479e3b95547f8d8649b3489577059f9c5b4",
+      "version": "1.19.0"
+    },
+    "greywall": {
+      "sha256": "cd71b0a96a59458d922d192de10e24e986060faea22e5eb854e6198735056d0c"
+    },
+    "greyproxy": {
+      "sha256": "aadef1a38b71a36d2ad4fcd916ded9586f3d11b0c112fb6847f6d50e48001505"
+    },
+    "mxc-exec-mac": {
+      "sha256": "df1a01bff34eaaa76c8e047e3ac4c8ede5ca2d642c96f6086d4234190495425e"
+    }
+  },
+  "harness_sha256": "a0d456c2ccc1df76981021d45e0a0b9ad85426589e22df2f530e88bcc2cc1b4d",
+  "fixtures_sha256": "77b3af2194785168c50e2a1a8481a999580a92387891f6502af523a2232e99bc"
+}

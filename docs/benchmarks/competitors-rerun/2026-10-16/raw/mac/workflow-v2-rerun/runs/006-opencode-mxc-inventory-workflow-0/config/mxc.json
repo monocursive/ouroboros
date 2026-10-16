@@ -1,0 +1,58 @@
+{
+  "version": "1.0.0",
+  "containment": "seatbelt",
+  "process": {
+    "commandLine": "/Users/monocursive/bench-ouro-rerun/bin/opencode run --dir /Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/workspace/inventory-workflow --model anthropic/claude-sonnet-4-5 'Implement category summaries in this inventory CLI. Add --group-by-category to python3 -m inventory.cli. Read the CSV using the existing loader, apply --min-quantity before grouping, and emit a JSON array sorted by category. Each object must have category (string), quantity (sum of quantities), and stock_value (sum of quantity * unit_price as an exact decimal formatted with two fractional digits, a JSON string). Ungrouped output must keep its current behavior. Invalid CSV must produce exit code 2 and a useful stderr message without a traceback. Update README.md with a grouped example and its expected output. Run python3 -m unittest discover -s tests -v and fix failures. Do not change the supplied tests. Keep processing and argument parsing in separate modules.'",
+    "cwd": "/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/workspace/inventory-workflow",
+    "timeout": 240000,
+    "inheritDefaultEnv": true,
+    "env": [
+      "HOME=/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/home",
+      "PATH=/Users/monocursive/bench-ouro-rerun/bin:/Users/monocursive/bench-ouro-rerun/bin:/Users/monocursive/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+      "TMPDIR=/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/home/tmp",
+      "ANTHROPIC_API_KEY=<ANTHROPIC_API_KEY>",
+      "CODEX_HOME=/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/state",
+      "CLAUDE_CONFIG_DIR=/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/home/.claude",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+      "DISABLE_TELEMETRY=1",
+      "OPENCODE_DISABLE_AUTOUPDATE=true",
+      "XDG_CONFIG_HOME=/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/home/.config",
+      "XDG_DATA_HOME=/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/home/.local/share",
+      "XDG_STATE_HOME=/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/home/.local/state",
+      "XDG_CACHE_HOME=/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/home/.cache",
+      "NODE_EXTRA_CA_CERTS=/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/home/proxy-ca.pem",
+      "SSL_CERT_FILE=/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/home/proxy-ca.pem",
+      "REQUESTS_CA_BUNDLE=/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/home/proxy-ca.pem",
+      "GIT_CONFIG_NOSYSTEM=1",
+      "GIT_CONFIG_GLOBAL=/dev/null"
+    ]
+  },
+  "filesystem": {
+    "readonlyPaths": [
+      "/Users/monocursive/bench-ouro-rerun/bin",
+      "/Users/monocursive/bench-ouro/bin",
+      "/opt/homebrew"
+    ],
+    "readwritePaths": [
+      "/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/workspace/inventory-workflow",
+      "/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/home",
+      "/Users/monocursive/bench-ouro-rerun/results/workflow-v2-rerun/runs/006-opencode-mxc-inventory-workflow-0/state",
+      "/private/tmp/claude-501",
+      "/private/tmp/opencode"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:43051"
+  },
+  "seatbelt": {
+    "extraMachLookups": [
+      "com.apple.cfprefsd.agent",
+      "com.apple.cfprefsd.daemon"
+    ]
+  }
+}

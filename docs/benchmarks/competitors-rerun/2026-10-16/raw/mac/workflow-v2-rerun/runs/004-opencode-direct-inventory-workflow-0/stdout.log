@@ -1,0 +1,46 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by planning this task.
+Now I'll implement the grouping logic. Based on the tests, I need to:
+1. Add a function to handle category grouping in the `report.py` module
+2. Update the CLI to accept `--group-by-category` flag
+3. Ensure CSV errors return exit code 2 (already handled in cli.py:15-17)
+4. Update README with an example
+
+Let me add the grouping logic to the report module:
+Now I'll update the CLI to add the `--group-by-category` flag and use the appropriate report function:
+Now I'll update the README with a grouped example:
+Now let me run the tests:
+Perfect! All tests pass. Let me verify the implementation works correctly with a quick manual test:
+Excellent! Let me also verify the ungrouped behavior is preserved:
+Perfect! All tasks completed successfully. Here's a summary of what was implemented:
+
+## Summary
+
+I've successfully implemented category summaries for the inventory CLI with the following changes:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_report()` function:
+   - Filters items by min_quantity before grouping
+   - Groups items by category and calculates totals
+   - Returns sorted JSON array with category, quantity sum, and stock_value
+   - Stock value is formatted as a decimal string with exactly 2 fractional digits
+
+2. **inventory/cli.py** - Added `--group-by-category` flag:
+   - Argument parsing kept separate in cli.py
+   - Processing logic kept separate in report.py
+   - Conditionally calls `category_report()` or `item_report()` based on flag
+   - CSV errors already return exit code 2 with useful stderr messages
+
+3. **README.md** - Updated with grouped example:
+   - Shows command usage with --group-by-category flag
+   - Includes expected JSON output
+
+### Test Results:
+
+All 10 tests pass, including:
+- `test_category_summaries` - Verifies grouped output format
+- `test_filter_before_group` - Confirms --min-quantity is applied before grouping
+- `test_bad_csv` - Validates exit code 2 and no traceback on errors
+- `test_ungrouped` - Ensures ungrouped behavior is preserved
+
+The implementation follows all requirements: separate modules for processing and argument parsing, exact decimal formatting, sorted output, and proper error handling.

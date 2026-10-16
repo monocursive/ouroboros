@@ -1,0 +1,5 @@
+Implemented `--group-by-category` with filtering before grouping, sorted category summaries, and exact decimal totals formatted as JSON strings with two fractional digits.
+
+Processing remains separate from argument parsing. Ungrouped output is preserved, invalid CSV exits with code 2 without a traceback, and README includes the grouped example and expected output.
+
+All 10 tests passed. Supplied tests were unchanged.

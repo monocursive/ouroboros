@@ -1,0 +1,32 @@
+I'll implement category summaries in the inventory CLI with the specifications you provided. Let me start by exploring the codebase structure and planning the work.
+Now I understand the codebase structure. Let me create a task plan:
+Now let me implement the feature. First, I'll create the category summary function in report.py:
+Now let me update the CLI to add the argument and use the appropriate report function:
+Now let me update the README.md with a grouped example:
+Now let me run the tests to see if everything passes:
+Excellent! All tests pass. Let me verify the actual behavior by running a couple of commands to make sure everything works as expected:
+Perfect! Let me also test the error handling to make sure invalid CSV produces exit code 2 with a useful message:
+Perfect! I've successfully implemented the category summaries feature for the inventory CLI. Here's what was done:
+
+## Summary
+
+1. **Added `--group-by-category` flag** to the CLI argument parser in `inventory/cli.py:11`
+
+2. **Created `category_summary()` function** in `inventory/report.py:8-22` that:
+   - Filters items by `min_quantity` before grouping (as required)
+   - Groups items by category
+   - Sums quantities and calculates stock values (quantity * unit_price)
+   - Formats stock_value as a string with exactly two decimal places
+   - Returns results sorted by category name
+
+3. **Updated CLI logic** in `inventory/cli.py:15-18` to call the appropriate report function based on the `--group-by-category` flag
+
+4. **Updated README.md** with a grouped example showing the command and expected JSON output
+
+5. **All tests pass** (10/10) including:
+   - Existing ungrouped behavior preserved
+   - Category summaries working correctly
+   - Filter applied before grouping
+   - Invalid CSV returns exit code 2 with useful error message (no traceback)
+
+The implementation maintains separation of concerns with argument parsing in `cli.py` and processing logic in `report.py`, uses the existing CSV loader, and properly handles decimal precision for monetary values.

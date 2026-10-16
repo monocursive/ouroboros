@@ -1,0 +1,79 @@
+{
+  "schema": "competitor-comparison/1",
+  "host": {
+    "system": "Darwin",
+    "node": "muetdhiver2.home",
+    "release": "27.0.0",
+    "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:20:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6020",
+    "machine": "arm64",
+    "processor": "arm"
+  },
+  "cpu_count": 10,
+  "started_utc": "2026-10-16T10:01:06Z",
+  "samples": 30,
+  "warmup": 3,
+  "seed": 20261016,
+  "hashes": {
+    "bin/greywall": "cd71b0a96a59458d922d192de10e24e986060faea22e5eb854e6198735056d0c",
+    "bin/mxc-exec-mac": "df1a01bff34eaaa76c8e047e3ac4c8ede5ca2d642c96f6086d4234190495425e",
+    "work/workload": "382a5e216cfb62251027e8194c6637df1b0b0b43e2695e33d733789aaf6cee2c",
+    "work/payload.py": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+    "greywall.json": "0f51a5231c39a74f7124edd05d2ef16a8b4f90fb55cdc9ab1b19e9f6b8b50e07",
+    "harness/agentbench.py": "77b3af2194785168c50e2a1a8481a999580a92387891f6502af523a2232e99bc",
+    "harness/agentbench_v2.py": "a0d456c2ccc1df76981021d45e0a0b9ad85426589e22df2f530e88bcc2cc1b4d",
+    "harness/agentbench_workflow.py": "6c28a1123d737a1dc67189baf6f1d0fd911fde4cd27807dad3e8fa056999ce50",
+    "harness/audit_results.py": "1e85643be9400ec655e835ebddbcfac942a2899657772d2bd2d31b5e81cab07b",
+    "harness/backing_probe.py": "3e8a6fded0cbad888409a1d945e026c6c972971d2eea14c31b6c93633bedc601",
+    "harness/build_report.py": "61b06c405e2c9084be11d16b15f6d1fd6ac860d78efaf52a8aca60476b3599c5",
+    "harness/cleanup_services.py": "80613e85ae8f7994ffa341ba9953d0abd0b2da4a1b2245c781c38f57c01daca1",
+    "harness/container_agent_runner.py": "11581ddbd122abfd1a07ecc8770d8ccda83226c2ed4fae9ddf8029a0dcd2eb11",
+    "harness/container_egress_probe.py": "979d0e7e1485099c30eedf92d41d188ca7ff3e9dfd756a15018283a4642d486e",
+    "harness/container_filesystem_probe.py": "b5270f190e22cc339e1de536051fcf7b20210d092e0ddc0464dd0a57ea2011c7",
+    "harness/container_limits_probe.py": "ab8d6ea19be15398eec3548771bd2e60f860214fdf883c65e84212e50234bbfe",
+    "harness/export_results.py": "f5f9cb7fc801e1f1eb52847cf3876c04fb60afc4f73cf72c4bcf9ec1a0fe24dd",
+    "harness/finalize_analysis.py": "a7aa2ec9fb5e7cf9a87d4862efee1e4904d4aa5ca0f761c2ca00fdddac2b41ec",
+    "harness/grey_rule_probe.py": "cd175105ea5f0a9a6a89aad15f97d04377626baf008b9b1b54719fe1113ee53d",
+    "harness/greyproxy-v0.4.5.yml": "33734715cfa59a309c7be3fc571595a260748256a5b6111ea2ad83e384bc3929",
+    "harness/host_snapshot.py": "892b49075209e7eb2e91d20a5bb08ee843034e9da74ff182c4650c21226ac479",
+    "harness/import_archive.py": "4f133b42f998077a9d0f99fd53f383cc70e4190ae98faad39aefcfdeb7a8a75c",
+    "harness/mxc_keychain_variant.py": "70f497dc05b97d25718c5bf7b7695c380bbfe65336590a56f92646c5dc9bd73e",
+    "harness/openshell-provider-claude-code.yaml": "1a95f03681ec9bc82072ead502c810a07119d81fb73f5aa052a8953a32e25e36",
+    "harness/openshell-provider-codex.yaml": "ea13f3d42e8c0d906e651eebab552e37e8cdca66b213f786bcf0b070cd4be255",
+    "harness/openshell_agent_lane.py": "3b3efe7aee0c54b43b243df368e6a4fa6b5987e576711b0f017e0ba8e4eeb1c1",
+    "harness/openshell_agent_v2.py": "7b66730c11dc0815b8c6e23731b9889f82296c6cccbec4608bcdc4e278bbe375",
+    "harness/openshell_lane.py": "98fb7d711831f8dd00b2146513184c27b749967b9b5c035ba8c1109e8d5c3dbc",
+    "harness/openshell_perf_v2.py": "410ab846dc0116a3e18132e87095abeaea2e4215cf2bab8b5b327d380c3eb1a1",
+    "harness/ouro_vm_lane.py": "22af16f09344a3a523622d62eeef4fcdb000c642dbbf3fbda56fc4e2c8c65da4",
+    "harness/payload.py": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+    "harness/pi_warm_startup.py": "17f3e6fe58b4062bcca3da62cade41bbaada9af470d781dfa589cd98b0420763",
+    "harness/refresh_codex_from_cache.py": "ce18255a13d57d113ce293482952860c2ef90acc131b1d5937c8b78281ce7972",
+    "harness/resource_probes.py": "d59035cda40aa964f0fb996205e255bb6d0e48b0bdcb4f940e5ff73742e5d39a",
+    "harness/suite.py": "f45ba8b28ad09a1049bdd5ca05ad5c5a3095922aded92715cff87dcb4eb4e7f5",
+    "harness/summarize.py": "fa08d2448f50a4cd8071e807fcf45fb207fe6ef0e887f7b59cd17a5d4984d99b",
+    "harness/syscalls.c": "a088d73f4411927b4cb173a64a3dd59d9d4aa12598dd2f7ee20d3ec5107a5476",
+    "harness/tidy_stray_fixture.py": "ee69303c3c99b44228a214271c74bacb835af02449bc4033df3881060561e94a",
+    "harness/workflow_fixture.py": "c5e6e543326fd8cb71eb4596f0ea90834b6e4b644c849f9102e731decb001ea7",
+    "harness/workload.c": "9065f7b6f76f7a1eb8b61b3e1d44b9cb48b9939f1b68d4075cdfccc02a72ed02"
+  },
+  "versions": {
+    "ouro_version": {
+      "error": "[Errno 2] No such file or directory: '/Users/monocursive/bench-ouro-rerun/runs/mac-perf/bin/ukai-jail'"
+    },
+    "greywall_version": {
+      "exit": 0,
+      "output": "greywall - lightweight, container-free sandbox for running untrusted commands\n  Version: 0.3.7\n  Built:   2026-06-01T15:01:40Z\n  Commit:  5581056d0523bfa244d8061008744ed9f72a0361\nPlatform: macOS\n\nChecking system capabilities:\n  \u2713 sandbox-exec (Seatbelt)\n"
+    },
+    "python_version": {
+      "exit": 0,
+      "output": "Python 3.9.6\n"
+    },
+    "mxc_help": {
+      "exit": 0,
+      "output": "macOS sandbox executor for MXC\n\nUsage: mxc-exec-mac [OPTIONS] [CONFIG_PATH]\n\nArguments:\n  [CONFIG_PATH]  Path to config JSON file (positional)\n\nOptions:\n      --config <CONFIG>                Path to config JSON file\n      --config-base64 <CONFIG_BASE64>  Base64-encoded JSON config\n      --debug                          Enable debug/console output\n      --experimental                   Enable experimental features\n      --allow-testing-features         Allow testing-only features that must never run in production, currently `network.proxy.builtinTestServer` (a bundled, deliberately-permissive test HTTP proxy). Distinct from --experimental\n      --dry-run                        Parse and validate config then exit without executing\n      --log-file <LOG_FILE>            Path to diagnostic log file (appends, creates if missing)\n  -h, --help                           Print help\n"
+    },
+    "os": {
+      "exit": 0,
+      "output": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434\n"
+    }
+  }
+}

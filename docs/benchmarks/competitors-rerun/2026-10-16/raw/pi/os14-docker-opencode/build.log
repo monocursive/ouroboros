@@ -1,0 +1,50 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load remote build context
+#1 DONE 6.5s
+
+#1 [internal] load remote build context
+#1 DONE 6.5s
+
+#2 copy /context /
+#2 DONE 11.9s
+
+#3 [internal] load metadata for docker.io/library/bench-openshell:latest
+#3 DONE 0.2s
+
+#4 [1/7] FROM docker.io/library/bench-openshell:latest@sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e
+#4 resolve docker.io/library/bench-openshell:latest@sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e
+#4 resolve docker.io/library/bench-openshell:latest@sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e 0.2s done
+#4 DONE 0.2s
+
+#5 [2/7] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*
+#5 CACHED
+
+#6 [3/7] RUN mkdir -p /opt/agents/bin /opt/bench /home/agent /work && chown 1000:1000 /home/agent /work
+#6 CACHED
+
+#7 [4/7] COPY bin/ /opt/agents/bin/
+#7 DONE 54.3s
+
+#8 [5/7] COPY harness/ /opt/bench/
+#8 DONE 1.7s
+
+#9 [6/7] RUN chmod -R a+rX /opt/agents /opt/bench
+#9 DONE 32.1s
+
+#10 [7/7] WORKDIR /work
+#10 DONE 0.7s
+
+#11 exporting to image
+#11 exporting layers
+#11 exporting layers 40.3s done
+#11 exporting manifest sha256:bfe27dcd23ef15c6b229b604794327c1d5014ff9f352e9fc166e198ccc2986b7 0.1s done
+#11 exporting config sha256:e25b064f5b1aec7821e386a41c73ed7292baf5674f6af3569ddecfd5897a1074
+#11 exporting config sha256:e25b064f5b1aec7821e386a41c73ed7292baf5674f6af3569ddecfd5897a1074 0.1s done
+#11 exporting attestation manifest sha256:d3fc3d86d1f518783ad933c7a85c18dfe3577726a2d45547902daef980270be1
+#11 exporting attestation manifest sha256:d3fc3d86d1f518783ad933c7a85c18dfe3577726a2d45547902daef980270be1 0.1s done
+#11 exporting manifest list sha256:0b3ba71613bf2f14ba4e096346e9280665f247be271645931c6b098575e4a3ec 0.0s done
+#11 naming to docker.io/library/ouro-comparison-opencode-v2:20261016 done
+#11 unpacking to docker.io/library/ouro-comparison-opencode-v2:20261016
+#11 unpacking to docker.io/library/ouro-comparison-opencode-v2:20261016 6.1s done
+#11 DONE 47.0s

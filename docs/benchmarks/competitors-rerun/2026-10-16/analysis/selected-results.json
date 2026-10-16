@@ -1,0 +1,1000 @@
+{
+  "schema": "selected-rerun/1",
+  "native_agents": [
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 19044.7
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 23402.5
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 15387.4
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 25969.5
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 25857.0
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 23420.8
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 37426.7
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 24922.1
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 23831.1
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 23572.1
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 64959.3
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 29457.4
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 19229.5
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 46658.9
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 75383.1
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 54384.6
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 48358.3
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 21462.8
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 34500.9
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 21401.9
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 23974.3
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 14595.5
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 62914.9
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 24239.4
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 16036.6
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 27718.1
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 49688.1
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 31655.2
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 29101.5
+    }
+  ],
+  "container_agents": [
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 21079.4,
+      "median_inner_ms": 20744.4
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 22027.4,
+      "median_inner_ms": 21401.5
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20510.0,
+      "median_inner_ms": 20347.0
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 15754.8,
+      "median_inner_ms": 15324.7
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 18438.0,
+      "median_inner_ms": 17722.5
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 16138.6,
+      "median_inner_ms": 15970.4
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 26430.2,
+      "median_inner_ms": 25837.9
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 26742.7,
+      "median_inner_ms": 26019.2
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 27846.2,
+      "median_inner_ms": 27702.4
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 25975.1,
+      "median_inner_ms": 22730.0
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 33529.1,
+      "median_inner_ms": 18118.4
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 74587.7,
+      "median_inner_ms": 52903.7
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20271.9,
+      "median_inner_ms": 19847.3
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 19872.7,
+      "median_inner_ms": 18708.8
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 19873.8,
+      "median_inner_ms": 19593.8
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 17611.5,
+      "median_inner_ms": 17036.6
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 18685.9,
+      "median_inner_ms": 17647.0
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 16311.3,
+      "median_inner_ms": 16035.2
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 28360.5,
+      "median_inner_ms": 27565.7
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 28768.0,
+      "median_inner_ms": 27601.5
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 30679.4,
+      "median_inner_ms": 30392.3
+    }
+  ],
+  "workflows": [
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "claude",
+      "mode": "docker",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "codex",
+      "mode": "docker",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "docker",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "claude",
+      "mode": "direct",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "claude",
+      "mode": "greywall",
+      "success": false,
+      "exit": 65
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "claude",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "codex",
+      "mode": "direct",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "codex",
+      "mode": "greywall",
+      "success": false,
+      "exit": 65
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "codex",
+      "mode": "mxc",
+      "success": false,
+      "exit": 1
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "direct",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "greywall",
+      "success": false,
+      "exit": 65
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "container",
+      "agent": "claude",
+      "mode": "docker",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "container",
+      "agent": "codex",
+      "mode": "docker",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "docker",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "claude",
+      "mode": "direct",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "claude",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "claude",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "claude",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "codex",
+      "mode": "direct",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "codex",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "codex",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "codex",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "direct",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "claude",
+      "mode": "docker",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "codex",
+      "mode": "docker",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "docker",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "claude",
+      "mode": "direct",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "claude",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "claude",
+      "mode": "mxc",
+      "success": false,
+      "exit": 1
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "claude",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "codex",
+      "mode": "direct",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "codex",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "codex",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "codex",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "direct",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0
+    }
+  ],
+  "selection": [
+    {
+      "source": "raw/vps/v5-claude-rerun/agent-runs.ndjson",
+      "sha256": "185a77972a6c55176d6855d0ace99e85e72040c97f6caa1ca33962b810ac5e38"
+    },
+    {
+      "source": "raw/vps/v5-codex-rerun/agent-runs.ndjson",
+      "sha256": "69227a1c6f5f53e46fa491567277866beb7669df1bbc9f97614f468e82b29964"
+    },
+    {
+      "source": "raw/vps/v5-opencode-rerun/agent-runs.ndjson",
+      "sha256": "0df255fb2a392a232bc6f37a96e2706b581c81d8bb4a0408a88144bd99f54c0f"
+    },
+    {
+      "source": "raw/pi/v5-claude-rerun/agent-runs.ndjson",
+      "sha256": "0978e9891928b91ed180602889b4ba1ee11ec2fd3c9699c90987b2a5860976e7"
+    },
+    {
+      "source": "raw/pi/v5-codex-rerun/agent-runs.ndjson",
+      "sha256": "a7cbf433cd5f3960422350952217f02399dd1ae5696af95af89c8d4b932ca656"
+    },
+    {
+      "source": "raw/pi/v5-opencode-rerun/agent-runs.ndjson",
+      "sha256": "066dea80547629d0e8a024da950b71663d2be98ebed91b74b7fdc7d42988474b"
+    },
+    {
+      "source": "raw/mac/v5-claude-rerun/agent-runs.ndjson",
+      "sha256": "10168bfa7b60560bd4fc7197836872cd088da2b062a317df58a1bab96e2ff870"
+    },
+    {
+      "source": "raw/mac/v5-codex-rerun/agent-runs.ndjson",
+      "sha256": "0b639bf634d3a9ba0b4b9e1d360bcbdb320188538241496c8f3c777d0e6b6042"
+    },
+    {
+      "source": "raw/mac/v5-opencode-rerun/agent-runs.ndjson",
+      "sha256": "7c20c4d656b1c4a96184515c9a8c4c440952c2fdbfed8a8a7c67402df4bb0457"
+    },
+    {
+      "source": "raw/vps/os14-claude/agent-runs.ndjson",
+      "sha256": "b8c537643e49f3e897b0198f7d25b12da639da2a16ece4db3152eb81f15ec5d0"
+    },
+    {
+      "source": "raw/vps/os14-codex/agent-runs.ndjson",
+      "sha256": "dd05af6cc62410a246ed640a3fb8dafcb70598e23d2bb454f1ee8f18221e7b87"
+    },
+    {
+      "source": "raw/vps/os14-opencode/agent-runs.ndjson",
+      "sha256": "0c53429b1e3d1536edbe98f5205548b340eece8f6151f0ef98d71acfa73f160e"
+    },
+    {
+      "source": "raw/pi/os14-docker-claude/agent-runs.ndjson",
+      "sha256": "63ccbcdfbb40523598b3af3ea78cb3d93913f96706dd7f8b61c5cbcaba4f44d8"
+    },
+    {
+      "source": "raw/pi/os14-docker-codex/agent-runs.ndjson",
+      "sha256": "6e885400f11eedb13b56cc4af01f693dc123ed501fea211849bd5fd79515e71a"
+    },
+    {
+      "source": "raw/pi/os14-docker-opencode/agent-runs.ndjson",
+      "sha256": "3d589e949fd1f89c9842bf0d4165a711309bce698833cccf1f4d969aa023c486"
+    },
+    {
+      "source": "raw/mac/os14-agents/agent-runs.ndjson",
+      "sha256": "8bca27d9a441cceeacc8f482edeab71e840cb2af6680adfb89695e686c7b7f49"
+    },
+    {
+      "source": "raw/vps/workflow-v2-rerun/agent-runs.ndjson",
+      "sha256": "5530ceedc43a9114c8415e460434cea5b20c4f05853c0eeab585558f7e9231d6"
+    },
+    {
+      "source": "raw/vps/os14-wf-claude/agent-runs.ndjson",
+      "sha256": "10a7efa804cd7d1fc28edcddaa3c136e8e021f94e4dd58371fd214ed39e8ce33"
+    },
+    {
+      "source": "raw/vps/os14-wf-codex/agent-runs.ndjson",
+      "sha256": "bbe907b4ca3d7a4a2b39ffff2352782795162b52f57d30083e72889b5844a0ae"
+    },
+    {
+      "source": "raw/vps/os14-wf-opencode/agent-runs.ndjson",
+      "sha256": "fdeafe243209218150bb043f06a8a885cb04c2ae37af934074cf7d38c355ac92"
+    },
+    {
+      "source": "raw/pi/workflow-v2-rerun/agent-runs.ndjson",
+      "sha256": "fbbfa5752fc4c6f98f6792aad18041063a7dc0bfb17dcbb0af0fba163ffa7b75"
+    },
+    {
+      "source": "raw/pi/os14-docker-wf-claude/agent-runs.ndjson",
+      "sha256": "eeec6cdc090a2a934133e9e19be00b3ab8d93dd522764e0d47556c2177426265"
+    },
+    {
+      "source": "raw/pi/os14-docker-wf-codex/agent-runs.ndjson",
+      "sha256": "c14be741b19e166c25d3cc7d1f88105a05966aad2a28e9e33a9f69599c5d8a2e"
+    },
+    {
+      "source": "raw/pi/os14-docker-wf-opencode/agent-runs.ndjson",
+      "sha256": "de45ad3e4388443fdb26b0fda7296bae55711acf3f3b0eba6bcc0da1488cec25"
+    },
+    {
+      "source": "raw/mac/workflow-v2-rerun/agent-runs.ndjson",
+      "sha256": "45ab969d7fcbbaf721fbf28cf126cb903d475063dbd1a37330d26ec1eef01134"
+    },
+    {
+      "source": "raw/mac/os14-wf/agent-runs.ndjson",
+      "sha256": "d74a02f948afb63b6db5fb74b94c14c5160d7f616800c59221fd6964b33df5ef"
+    }
+  ]
+}

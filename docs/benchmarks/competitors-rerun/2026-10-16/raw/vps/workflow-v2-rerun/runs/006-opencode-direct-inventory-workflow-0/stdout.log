@@ -1,0 +1,42 @@
+I'll implement the category summaries feature for the inventory CLI. Let me start by exploring the codebase structure and then plan the implementation.
+Now I'll implement the category summaries feature. Let me start by analyzing the test requirements to understand the expected behavior:
+
+1. `test_category_summaries`: Groups by category, sums quantities and stock values, sorted by category
+2. `test_filter_before_group`: Applies --min-quantity filter before grouping
+3. Stock value calculation: quantity * unit_price with two decimal digits
+Let me start by adding the category grouping logic to report.py:
+Now let me update the CLI to add the --group-by-category argument and handle both modes:
+Now let me update the README.md with a grouped example:
+Now let me run the tests to see if everything works correctly:
+Excellent! All tests pass. Let me verify the implementation by testing it manually with the example CSV:
+Perfect! Let me also verify the error handling for invalid CSV:
+Perfect! I've successfully implemented the category summaries feature for the inventory CLI. Here's what was done:
+
+## Summary
+
+**Added to inventory/report.py:31**
+- Created `category_report()` function that:
+  - Filters items by `min_quantity` before grouping
+  - Groups items by category and sums quantities and stock values
+  - Returns a JSON array sorted by category
+  - Formats `stock_value` as a string with exactly 2 decimal places using Decimal arithmetic
+
+**Updated inventory/cli.py:11**
+- Added `--group-by-category` flag argument
+- Updated `main()` to call `category_report()` when the flag is set, otherwise uses `item_report()`
+- Existing error handling already produces exit code 2 with useful stderr messages
+
+**Updated README.md:7**
+- Added documentation section showing grouped example usage
+- Included expected output matching the test requirements
+
+## Verification
+
+All 10 tests pass, including:
+- `test_ungrouped`: Ungrouped output maintains current behavior
+- `test_filter`: Min-quantity filtering works 
+- `test_category_summaries`: Category grouping with correct totals and formatting
+- `test_filter_before_group`: Min-quantity applied before grouping
+- `test_bad_csv`: Invalid CSV produces exit code 2 with useful error message (no traceback)
+
+The implementation keeps processing logic in `report.py` and argument parsing in `cli.py` as separate modules as required.

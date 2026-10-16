@@ -1,0 +1,6 @@
+{
+  "harness_sha256": "ab8d6ea19be15398eec3548771bd2e60f860214fdf883c65e84212e50234bbfe",
+  "allocation_bytes": 335544320,
+  "ram_limit_bytes": 134217728,
+  "swap": "Runtime default, Docker normally grants another 128 MiB. No benchmark-only swap=0 flag."
+}

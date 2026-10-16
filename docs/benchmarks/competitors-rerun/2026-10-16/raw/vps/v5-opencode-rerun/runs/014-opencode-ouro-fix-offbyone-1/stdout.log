@@ -1,0 +1,14 @@
+I'll help you run the tests, find the bug, and fix it. Let me start by creating a task list and running the tests.
+Now let me run the tests:
+Let me read the test file and the source file to understand the issue:
+Perfect! I found the bug. In src/parse.py:4, the function is using `parts[1]` which is an off-by-one error. It should be `parts[0]` to get the first element of the list.
+
+The bug causes:
+1. `first_word('hello world')` to return 'world' instead of 'hello' (returns the second word)
+2. `first_word('solo')` to raise an IndexError because there's no index 1 when there's only one word
+
+Let me fix it:
+Now let me verify all tests pass:
+Perfect! All tests are now passing. 
+
+The bug was an off-by-one error in src/parse.py:4. The function was using `parts[1]` to access the second element of the list instead of `parts[0]` to access the first element. This caused it to return the wrong word and crash when there was only one word in the input. The fix was simple: change the index from 1 to 0.

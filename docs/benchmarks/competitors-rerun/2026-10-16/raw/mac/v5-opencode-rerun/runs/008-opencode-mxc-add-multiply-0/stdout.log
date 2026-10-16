@@ -1,0 +1,11 @@
+I'll help you add the multiply function and ensure all tests pass. Let me start by planning this task.
+Now let me read the existing code and check the tests to understand what needs to be implemented.
+Perfect! I can see the tests expect a `multiply(a, b)` function that returns the product of two numbers. Let me add this function to src/calc.py.
+Excellent! All tests are passing. Let me update the todo list to mark everything as complete.
+Perfect! I've successfully completed the task:
+
+1. ✅ Added the `multiply(a, b)` function to src/calc.py:4 that returns the product of two numbers
+2. ✅ Ran the tests using `python3 -m unittest discover -s tests -v`
+3. ✅ All tests passed (2/2 tests OK)
+
+The `multiply` function correctly handles both positive multiplication (2 × 3 = 6) and negative multiplication (-1 × 5 = -5) as verified by the test cases.

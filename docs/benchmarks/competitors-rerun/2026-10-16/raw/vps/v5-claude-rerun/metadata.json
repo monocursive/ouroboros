@@ -1,0 +1,182 @@
+{
+  "schema": "agent-comparison/2",
+  "host": {
+    "system": "Linux",
+    "node": "vps-450b3fe8",
+    "release": "7.0.0-31-generic",
+    "version": "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+    "machine": "x86_64",
+    "processor": ""
+  },
+  "started_utc": "2026-10-16T11:18:58Z",
+  "seed": 20261016,
+  "schedule": [
+    [
+      "claude",
+      "refactor-yaml-json",
+      0,
+      "mxc"
+    ],
+    [
+      "claude",
+      "refactor-yaml-json",
+      0,
+      "direct"
+    ],
+    [
+      "claude",
+      "refactor-yaml-json",
+      0,
+      "ouro"
+    ],
+    [
+      "claude",
+      "refactor-yaml-json",
+      0,
+      "greywall"
+    ],
+    [
+      "claude",
+      "fix-offbyone",
+      0,
+      "ouro"
+    ],
+    [
+      "claude",
+      "fix-offbyone",
+      0,
+      "mxc"
+    ],
+    [
+      "claude",
+      "fix-offbyone",
+      0,
+      "greywall"
+    ],
+    [
+      "claude",
+      "fix-offbyone",
+      0,
+      "direct"
+    ],
+    [
+      "claude",
+      "add-multiply",
+      0,
+      "ouro"
+    ],
+    [
+      "claude",
+      "add-multiply",
+      0,
+      "mxc"
+    ],
+    [
+      "claude",
+      "add-multiply",
+      0,
+      "direct"
+    ],
+    [
+      "claude",
+      "add-multiply",
+      0,
+      "greywall"
+    ],
+    [
+      "claude",
+      "fix-offbyone",
+      1,
+      "mxc"
+    ],
+    [
+      "claude",
+      "fix-offbyone",
+      1,
+      "ouro"
+    ],
+    [
+      "claude",
+      "fix-offbyone",
+      1,
+      "greywall"
+    ],
+    [
+      "claude",
+      "fix-offbyone",
+      1,
+      "direct"
+    ],
+    [
+      "claude",
+      "add-multiply",
+      1,
+      "direct"
+    ],
+    [
+      "claude",
+      "add-multiply",
+      1,
+      "ouro"
+    ],
+    [
+      "claude",
+      "add-multiply",
+      1,
+      "mxc"
+    ],
+    [
+      "claude",
+      "add-multiply",
+      1,
+      "greywall"
+    ],
+    [
+      "claude",
+      "refactor-yaml-json",
+      1,
+      "direct"
+    ],
+    [
+      "claude",
+      "refactor-yaml-json",
+      1,
+      "ouro"
+    ],
+    [
+      "claude",
+      "refactor-yaml-json",
+      1,
+      "mxc"
+    ],
+    [
+      "claude",
+      "refactor-yaml-json",
+      1,
+      "greywall"
+    ]
+  ],
+  "codex_model": "gpt-6.1-sol",
+  "anthropic_model": "claude-sonnet-4-5",
+  "wall_seconds": 180,
+  "bins": {
+    "claude": {
+      "sha256": "4503bfe11a6c7fcc1e0b39b5e0d347c04248f750b03b0977b3ad6b531fe6f358",
+      "version": "2.1.295 (Claude Code)"
+    },
+    "ukai-jail": {
+      "sha256": "0c75569e5bc84d785ef64910e52d220c6a797892760e819ad6c489a147d6eeda"
+    },
+    "greywall": {
+      "sha256": "9968afd25b7b4b9f16ce5b868115e108e4ea856f5d62bc3ee6be78eb20e8f950"
+    },
+    "greyproxy": {
+      "sha256": "29d3771355b03a8c3563e39aecf86b6f3e9fa6ec40939ba67fc10f4254db7747"
+    },
+    "lxc-exec": {
+      "sha256": "b4628bbb3bf714af95ac53d9630299e5dbd37635b9d1e36bf2015731e0d64ad1"
+    }
+  },
+  "harness_sha256": "a0d456c2ccc1df76981021d45e0a0b9ad85426589e22df2f530e88bcc2cc1b4d",
+  "fixtures_sha256": "77b3af2194785168c50e2a1a8481a999580a92387891f6502af523a2232e99bc"
+}

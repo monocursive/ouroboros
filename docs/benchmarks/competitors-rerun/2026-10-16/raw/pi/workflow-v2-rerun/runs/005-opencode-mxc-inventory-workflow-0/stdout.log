@@ -1,0 +1,47 @@
+I'll implement the category summaries feature for the inventory CLI. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the codebase structure. Let me plan the implementation:
+Let me start implementing. First, I'll add the category grouping function to report.py:
+Excellent! All tests pass. Let me verify the implementation meets all requirements by testing it manually:
+Perfect! Let me verify the error handling for invalid CSV:
+Perfect! Let me verify the final implementation by reviewing what we've built:
+Perfect! The implementation is complete and all requirements have been met. Let me create a summary of what was implemented:
+
+## Summary
+
+I've successfully implemented category summaries for the inventory CLI. Here's what was done:
+
+### Changes Made
+
+1. **inventory/report.py** - Added `category_report()` function (lines 8-29):
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category and calculates totals
+   - Returns sorted JSON array with category, quantity, and stock_value
+   - Uses `Decimal` for precise calculations
+   - Formats stock_value with exactly 2 decimal places as a string
+
+2. **inventory/cli.py** - Updated to support `--group-by-category` flag (lines 5, 11, 15-18):
+   - Added argument parser for `--group-by-category`
+   - Conditionally calls `category_report()` or `item_report()` based on flag
+   - Processing and argument parsing remain in separate modules
+
+3. **README.md** - Added documentation with example:
+   - Shows usage of `--group-by-category` flag
+   - Provides expected output example
+
+### Key Features
+
+- CSV reading uses existing `load_items()` from inventory/loader.py:5
+- `--min-quantity` filtering applied before grouping (inventory/report.py:10)
+- JSON output sorted by category name (inventory/report.py:22)
+- stock_value is sum of (quantity * unit_price) formatted as exact decimal string with 2 digits (inventory/report.py:26)
+- Ungrouped output preserves current behavior
+- Invalid CSV produces exit code 2 with stderr message, no traceback (inventory/cli.py:19-21)
+- All 10 tests pass, including the new category summary tests
+
+### Verification
+
+All tests pass:
+```
+python3 -m unittest discover -s tests -v
+```
+Result: 10 tests OK

@@ -1,0 +1,42 @@
+[
+  {
+    "tool": "docker-run",
+    "exit": 0,
+    "stdout": "{\"probe\": \"tcp\", \"allowed\": true}\n",
+    "stderr": "",
+    "host_accepts_during_probe": 1,
+    "bridge_gateway": "172.17.0.1",
+    "probe_destination": "172.17.0.1",
+    "port": 45091
+  },
+  {
+    "tool": "docker-warm",
+    "exit": 0,
+    "stdout": "{\"probe\": \"tcp\", \"allowed\": true}\n",
+    "stderr": "",
+    "host_accepts_during_probe": 1,
+    "bridge_gateway": "172.17.0.1",
+    "probe_destination": "172.17.0.1",
+    "port": 45091
+  },
+  {
+    "tool": "openshell-ephemeral",
+    "exit": 0,
+    "stdout": "\nCreated sandbox: infinite-blackbuck\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.0s] Image already present\n[0.1s] Starting sandbox Container created\n{\"probe\": \"tcp\", \"allowed\": false, \"error\": \"[Errno 13] Permission denied\"}\n\u2713 Deleted sandbox infinite-blackbuck\n",
+    "stderr": "",
+    "host_accepts_during_probe": 0,
+    "bridge_gateway": "172.17.0.1",
+    "probe_destination": "172.17.0.1",
+    "port": 45091
+  },
+  {
+    "tool": "openshell-warm",
+    "exit": 0,
+    "stdout": "{\"probe\": \"tcp\", \"allowed\": false, \"error\": \"[Errno 13] Permission denied\"}\n",
+    "stderr": "",
+    "host_accepts_during_probe": 0,
+    "bridge_gateway": "172.17.0.1",
+    "probe_destination": "172.17.0.1",
+    "port": 45091
+  }
+]

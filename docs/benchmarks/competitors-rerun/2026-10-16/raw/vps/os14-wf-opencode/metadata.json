@@ -1,0 +1,42 @@
+{
+  "schema": "container-agent-comparison/2",
+  "host": {
+    "system": "Linux",
+    "node": "vps-450b3fe8",
+    "release": "7.0.0-31-generic",
+    "version": "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+    "machine": "x86_64",
+    "processor": ""
+  },
+  "started_utc": "2026-10-16T12:38:11Z",
+  "image_id": "sha256:cac8dbb98e0d7bcdb4f147b0ac37c2b15265fd79346af4ac01fe2c4a3053e7ed",
+  "schedule": [
+    [
+      "opencode",
+      "inventory-workflow",
+      0,
+      "openshell-warm"
+    ],
+    [
+      "opencode",
+      "inventory-workflow",
+      0,
+      "openshell-ephemeral"
+    ],
+    [
+      "opencode",
+      "inventory-workflow",
+      0,
+      "docker"
+    ]
+  ],
+  "seed": 20261016,
+  "harness_sha256": "7b66730c11dc0815b8c6e23731b9889f82296c6cccbec4608bcdc4e278bbe375",
+  "single_agent_image": true,
+  "container_bin_hashes": {
+    "claude": "4503bfe11a6c7fcc1e0b39b5e0d347c04248f750b03b0977b3ad6b531fe6f358",
+    "opencode": "135ac3f86c43f2a22328a3554fec5f0bc57d71576077902661bc38dac34871fd",
+    "codex": "1748767b230ebfc3d4ab7e4e254920d0c0ad9691fd8c11f190e7d44511a4a92e",
+    "codex-code-mode-host": "5b2c075ac2380fa04d76d7313fbc044d29c8d0a0d0b9138415acd4610211ca03"
+  }
+}

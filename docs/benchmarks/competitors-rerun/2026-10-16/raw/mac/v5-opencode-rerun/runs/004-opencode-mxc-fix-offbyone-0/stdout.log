@@ -1,0 +1,18 @@
+I'll help you run the tests, find the bug, and fix it. Let me start by creating a task plan and running the tests.
+I can see the test failures:
+1. `test_basic` expects `first_word('hello world')` to return `'hello'` but it returns `'world'`
+2. `test_single` expects `first_word('solo')` to return `'solo'` but it throws an `IndexError` at line 4 (accessing `parts[1]`)
+
+Let me read the source code and tests to understand the issue better:
+Perfect! I found the bug. The issue is a classic off-by-one error in `src/parse.py:4`. The function is returning `parts[1]` (the second element) instead of `parts[0]` (the first element). This is why:
+- `'hello world'.split(' ')` returns `['hello', 'world']`, and `parts[1]` returns `'world'` instead of `'hello'`
+- `'solo'.split(' ')` returns `['solo']`, and `parts[1]` throws an `IndexError` because there's no second element
+
+Let me fix this:
+Perfect! All tests are now passing. 
+
+The bug was an off-by-one error in `src/parse.py:4`. The function was returning `parts[1]` (the second element of the split array) instead of `parts[0]` (the first element). This caused:
+- `first_word('hello world')` to incorrectly return `'world'` instead of `'hello'`
+- `first_word('solo')` to crash with an `IndexError` since there's no second element
+
+I fixed it by changing `return parts[1]` to `return parts[0]`, and all tests now pass.

@@ -1,0 +1,47 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load remote build context
+#1 DONE 13.9s
+
+#1 [internal] load remote build context
+#1 DONE 13.9s
+
+#2 copy /context /
+#2 DONE 30.3s
+
+#3 [internal] load metadata for docker.io/library/bench-openshell:latest
+#3 DONE 7.2s
+
+#4 [1/7] FROM docker.io/library/bench-openshell:latest@sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e
+#4 resolve docker.io/library/bench-openshell:latest@sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e 0.1s done
+#4 DONE 0.1s
+
+#5 [2/7] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*
+#5 CACHED
+
+#6 [3/7] RUN mkdir -p /opt/agents/bin /opt/bench /home/agent /work && chown 1000:1000 /home/agent /work
+#6 CACHED
+
+#7 [4/7] COPY bin/ /opt/agents/bin/
+#7 DONE 31.0s
+
+#8 [5/7] COPY harness/ /opt/bench/
+#8 DONE 0.2s
+
+#9 [6/7] RUN chmod -R a+rX /opt/agents /opt/bench
+#9 DONE 25.5s
+
+#10 [7/7] WORKDIR /work
+#10 DONE 0.2s
+
+#11 exporting to image
+#11 exporting layers
+#11 exporting layers 51.9s done
+#11 exporting manifest sha256:9819153e8e10a5d6dba3355cb3a0832f033ddf067e3b430f3384d5b5f64fa076 0.1s done
+#11 exporting config sha256:6bfb7006d0e3a3e790472a7a35b8b5ee4e7c9197e53a158849622c7d122f8ca7 0.0s done
+#11 exporting attestation manifest sha256:53faf3fc5c321d0b96b06bf1e4c34f4bb6744fbaa039ccf8a951a5d1210e028f 0.1s done
+#11 exporting manifest list sha256:71fda906c1526dfa7de150fc21b22a43949786f4d421292bce51bc68a122e8db 0.1s done
+#11 naming to docker.io/library/ouro-comparison-codex-v2:20261016 done
+#11 unpacking to docker.io/library/ouro-comparison-codex-v2:20261016
+#11 unpacking to docker.io/library/ouro-comparison-codex-v2:20261016 11.4s done
+#11 DONE 63.7s

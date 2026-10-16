@@ -1,0 +1,34 @@
+{
+  "sequence": 17,
+  "agent": "opencode",
+  "mode": "direct",
+  "task": "add-multiply",
+  "repetition": 1,
+  "started_utc": "2026-10-16T11:47:16Z",
+  "elapsed_ms": 21557.202492,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_add (test_calc.TestCalc.test_add) ... ok\ntest_multiply (test_calc.TestCalc.test_multiply) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/home/ubuntu/bench-ouro-rerun/bin/opencode",
+    "run",
+    "--dir",
+    "/home/ubuntu/bench-ouro-rerun/results/v5-opencode-rerun/runs/017-opencode-direct-add-multiply-1/workspace/add-multiply",
+    "--model",
+    "anthropic/claude-sonnet-4-5",
+    "Add a function multiply(a, b) to src/calc.py that returns the product of two numbers. Then run the tests with: python3 -m unittest discover -s tests -v. Fix any failures until all tests pass. Do not modify the tests."
+  ],
+  "load": [
+    0.86669921875,
+    0.57958984375,
+    0.443359375
+  ],
+  "artifact": "runs/017-opencode-direct-add-multiply-1"
+}

@@ -1,0 +1,49 @@
+{
+  "sequence": 14,
+  "agent": "opencode",
+  "mode": "ouro",
+  "task": "fix-offbyone",
+  "repetition": 1,
+  "started_utc": "2026-10-16T11:45:15Z",
+  "elapsed_ms": 34033.912067,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/home/ubuntu/bench-ouro-rerun/bin/ukai-jail",
+    "run",
+    "--profile",
+    "agent",
+    "--launch",
+    "opencode",
+    "--workspace",
+    "/home/ubuntu/bench-ouro-rerun/results/v5-opencode-rerun/runs/014-opencode-ouro-fix-offbyone-1/workspace/fix-offbyone",
+    "--ro",
+    "/home/ubuntu/bench-ouro-rerun/bin",
+    "--limit",
+    "wall=180s",
+    "--receipt",
+    "/home/ubuntu/bench-ouro-rerun/results/v5-opencode-rerun/runs/014-opencode-ouro-fix-offbyone-1/jail.json",
+    "--",
+    "/home/ubuntu/bench-ouro-rerun/bin/opencode",
+    "run",
+    "--dir",
+    "/home/ubuntu/bench-ouro-rerun/results/v5-opencode-rerun/runs/014-opencode-ouro-fix-offbyone-1/workspace/fix-offbyone",
+    "--model",
+    "anthropic/claude-sonnet-4-5",
+    "The tests are failing. Run python3 -m unittest discover -s tests -v, find the bug in src/parse.py, and fix it so all tests pass. Do not modify the tests."
+  ],
+  "load": [
+    0.5458984375,
+    0.482421875,
+    0.40087890625
+  ],
+  "artifact": "runs/014-opencode-ouro-fix-offbyone-1"
+}

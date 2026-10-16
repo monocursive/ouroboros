@@ -1,0 +1,33 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure to understand the current implementation.
+Now I'll implement the category summaries feature. Let me start by creating the `category_report` function in report.py:
+Perfect! All tests pass. Let me verify the implementation by testing the CLI manually:
+Perfect! I've successfully implemented the category summaries feature for the inventory CLI. Here's what was done:
+
+## Implementation Summary
+
+### 1. Added `category_report` function to `inventory/report.py:6`
+- Filters items by `min_quantity` before grouping
+- Groups items by category and calculates:
+  - Total quantity per category (sum of quantities)
+  - Total stock value per category (sum of quantity * unit_price)
+- Returns a JSON array sorted by category name
+- Stock values are formatted as exact decimal strings with two fractional digits
+
+### 2. Updated `inventory/cli.py:3,9,14-17`
+- Added `--group-by-category` flag as a boolean argument
+- Imported `category_report` from report module
+- Modified main function to use `category_report` when flag is set, otherwise uses `item_report` (preserving existing behavior)
+- Invalid CSV errors still produce exit code 2 with useful stderr messages without tracebacks
+
+### 3. Updated `README.md:7-15`
+- Added "Grouped Output" section with example usage
+- Included expected output showing category summaries
+
+### 4. All tests pass
+- All 10 tests pass successfully, including the new category summary tests
+- `test_category_summaries`: Verifies grouped output format and calculations
+- `test_filter_before_group`: Confirms `--min-quantity` is applied before grouping
+- `test_bad_csv`: Confirms invalid CSV produces exit code 2 with useful error
+- Existing tests confirm ungrouped behavior is unchanged
+
+The implementation correctly maintains separation between processing logic (in `report.py`) and argument parsing (in `cli.py`), applies `--min-quantity` before grouping, and formats stock values as exact decimal strings with two fractional digits.

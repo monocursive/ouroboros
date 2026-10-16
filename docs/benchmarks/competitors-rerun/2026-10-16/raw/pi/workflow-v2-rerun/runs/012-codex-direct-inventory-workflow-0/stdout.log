@@ -1,0 +1,5 @@
+Implemented `--group-by-category` with filtering before grouping, sorted categories, and exact decimal stock totals formatted as JSON strings with two fractional digits.
+
+Preserved ungrouped behavior, improved invalid CSV handling, and added the README example. Processing and argument parsing remain separate.
+
+All 10 supplied tests pass; tests were unchanged.

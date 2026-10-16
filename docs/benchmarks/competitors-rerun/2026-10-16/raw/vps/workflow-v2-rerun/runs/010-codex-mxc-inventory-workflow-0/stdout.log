@@ -1,0 +1,5 @@
+Implemented `--group-by-category` with filtering before grouping, sorted categories, summed quantities, and exact decimal totals formatted as two-digit JSON strings.
+
+Preserved ungrouped behavior and separate parsing/reporting modules. Improved malformed CSV handling and added the README example.
+
+All 10 supplied tests pass; tests were unchanged.

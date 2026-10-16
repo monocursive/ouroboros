@@ -1,0 +1,26 @@
+{
+  "opencode/openshell-warm": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      72767.892025
+    ],
+    "median_ms": 72767.892025
+  },
+  "opencode/openshell-ephemeral": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      140638.160249
+    ],
+    "median_ms": 140638.160249
+  },
+  "opencode/docker": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      71793.814767
+    ],
+    "median_ms": 71793.814767
+  }
+}

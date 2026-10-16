@@ -1,0 +1,14 @@
+I'll help you run the tests, identify the bug, and fix it. Let me start by creating a task list and then running the tests.
+Now let me run the tests:
+I can see the issue! Let me examine the source code and tests to understand the bug:
+Perfect! I found the bug. The issue is a classic off-by-one error in src/parse.py:4. The function is using `parts[1]` which returns the **second** element (index 1), but it should return the **first** element (index 0).
+
+This causes:
+1. `'hello world'` → `['hello', 'world']` → returns `'world'` instead of `'hello'`
+2. `'solo'` → `['solo']` → IndexError because there's no index 1
+Let me fix the bug:
+Now let me verify the fix by running the tests again:
+Perfect! All tests are now passing. 
+
+**Summary:**
+The bug was an off-by-one error in src/parse.py:4. The function was using `parts[1]` to access the second element of the array instead of `parts[0]` to access the first element. This caused it to return the wrong word for multi-word strings and throw an IndexError for single-word strings. The fix was simple: change `parts[1]` to `parts[0]`.

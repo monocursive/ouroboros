@@ -1,0 +1,19 @@
+I'll help you run the tests, find the bug in src/parse.py, and fix it. Let me start by creating a task plan and then running the tests.
+Perfect! I found the bug. The issue is in src/parse.py:4 - it's returning `parts[1]` (the second element) instead of `parts[0]` (the first element). This is a classic off-by-one error.
+
+The bug causes:
+1. `first_word('hello world')` to return 'world' instead of 'hello' (FAIL)
+2. `first_word('solo')` to raise an IndexError because there's only one element in the list (ERROR)
+Perfect! All tests are now passing. 
+
+## Summary
+
+I found and fixed the bug in src/parse.py:4. The issue was an off-by-one error where the function was returning `parts[1]` instead of `parts[0]`. 
+
+The bug caused:
+- `first_word('hello world')` to incorrectly return 'world' instead of 'hello'
+- `first_word('solo')` to crash with an IndexError
+
+The fix was simple: change `return parts[1]` to `return parts[0]` to correctly return the first element of the split string.
+
+Both tests now pass successfully.

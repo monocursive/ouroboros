@@ -1,0 +1,18 @@
+{
+  "schema": "openshell-perf/2",
+  "host": {
+    "system": "Darwin",
+    "node": "muetdhiver2.home",
+    "release": "27.0.0",
+    "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:20:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6020",
+    "machine": "arm64",
+    "processor": "arm"
+  },
+  "image_id": "sha256:2a51b4b954089135b98af5ea3512b1bb13647ca923725a0a053f4c9bc2fee219",
+  "started_utc": "2026-10-16T10:04:58Z",
+  "harness_sha256": "410ab846dc0116a3e18132e87095abeaea2e4215cf2bab8b5b327d380c3eb1a1",
+  "samples": 30,
+  "warmup": 3,
+  "seed": 20261016,
+  "docker_only": false
+}

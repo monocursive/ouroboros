@@ -1,0 +1,16 @@
+I'll help you fix the failing tests. Let me start by running the tests to see what's failing, then investigate and fix the bug in src/parse.py.
+Now let me look at the test file and the source file to understand the issue:
+Perfect! I found the bug. The issue is an off-by-one error in src/parse.py:4. The function is returning `parts[1]` (the second element) instead of `parts[0]` (the first element). This causes:
+- `test_basic` to fail: returns 'world' instead of 'hello'
+- `test_single` to error: tries to access index 1 when the list only has 1 element
+
+Let me fix this:
+Now let me verify all tests pass:
+Perfect! I've successfully fixed the bug. The issue was a classic off-by-one error in src/parse.py:4 where the function was returning `parts[1]` instead of `parts[0]`. Since list indices in Python start at 0, the first element should be accessed with index 0, not 1.
+
+The fix changes:
+- `return parts[1]` → `return parts[0]`
+
+All tests now pass:
+- `test_basic`: correctly returns 'hello' from 'hello world'
+- `test_single`: correctly returns 'solo' from 'solo'

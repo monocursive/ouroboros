@@ -4,10 +4,11 @@ Each directory holds one line of measurement: [jail](jail/README.md) (the
 jail's own acceptance, performance and release evidence),
 [sandboxes](sandboxes/README.md), the comparison corpora
 ([competitors](competitors/README.md), `competitors-after`,
-`competitors-startup`, `credentials`) and the
+`competitors-startup`, [credentials](credentials/2026-10-13-next/README.md),
+[competitors-rerun](competitors-rerun/2026-10-16/README.md)) and the
 [greywall scripts](greywall-2026-09-28/) of the 2026-09-28 record. The
 [competitive analysis](competitive-analysis-2026-10-12.md) summarizes the
-corpora.
+corpora through 2026-10-11.
 
 These directories are most of the repository by weight. The rules below stop
 that growth without rewriting history: thousands of evidence files name

@@ -1,0 +1,59 @@
+{
+  "schema": "service-cleanup/1",
+  "date_utc": "2026-10-16T15:05:00Z",
+  "stopped": [
+    {
+      "host": "vps",
+      "service": "openshell-gateway 0.1.4 (corpus os14-vps)",
+      "argv_prefix": "openshell-gateway --config /home/ubuntu/bench-ouro-rerun/openshell/gateway.toml --name os14-vps --bind-address 127.0.0.1 --port 50617",
+      "reason": "temporary corpus gateway; measurement complete"
+    },
+    {
+      "host": "pi",
+      "service": "openshell-gateway 0.1.4 (corpus os14-pi)",
+      "argv_prefix": "openshell-gateway --config /home/monocursive/bench-ouro-rerun/openshell/gateway.toml --name os14-pi --bind-address 127.0.0.1 --port 50618",
+      "reason": "temporary corpus gateway; measurement complete"
+    },
+    {
+      "host": "mac",
+      "service": "openshell-gateway 0.1.4 (corpus os14-mac)",
+      "argv_prefix": "openshell-gateway --config /Users/monocursive/bench-ouro-rerun/openshell/gateway.toml --name os14-mac --bind-address 127.0.0.1 --port 50619",
+      "reason": "temporary corpus gateway; measurement complete"
+    },
+    {
+      "host": "vps",
+      "service": "greyproxy 0.4.5 from the completed bench-ouro-startup corpus",
+      "pid": 317146,
+      "reason": "stale idle proxy from a finished corpus held the 4305x ports and a foreign MITM CA; stopped before the clean coding runs so agentbench_v2 could provision a corpus-owned proxy"
+    }
+  ],
+  "left_running": [
+    {
+      "host": "vps",
+      "service": "natural-expiry soak (bench-ouro-natural-20261013)",
+      "reason": "five-part credential program; expires 2026-10-23; untouched"
+    },
+    {
+      "host": "vps",
+      "service": "openshell-gateway 0.1.3 (bench-credentials-20261013, port 50605)",
+      "reason": "belongs to the active credentials/2026-10-13-next corpus; not touched"
+    },
+    {
+      "host": "all",
+      "service": "installed binaries, Docker images, per-corpus trees under bench-ouro*/bench-ouro-rerun",
+      "reason": "kept for reuse per the prior corpora's convention"
+    }
+  ],
+  "images_removed_after_inspect": [
+    "ouro-comparison-claude-v2:20261016 (vps)",
+    "ouro-comparison-opencode-v2:20261016 (vps)",
+    "ouro-comparison-codex-v2:20261016 (vps)",
+    "ouro-comparison-claude-v2:20261016 (pi)",
+    "ouro-comparison-opencode-v2:20261016 (pi)",
+    "ouro-comparison-codex-v2:20261016 (pi)"
+  ],
+  "images_kept": [
+    "bench-openshell:latest (all hosts, fixture image reused from 2026-10-11)",
+    "ouro-comparison-agents-v2:20261016 (mac combined image, kept as in the prior corpus)"
+  ]
+}

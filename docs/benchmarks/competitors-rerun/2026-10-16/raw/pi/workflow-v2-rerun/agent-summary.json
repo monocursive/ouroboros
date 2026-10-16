@@ -1,0 +1,98 @@
+{
+  "claude/direct": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      89678.705182
+    ],
+    "median_ms": 89678.705182
+  },
+  "claude/mxc": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      99075.577945
+    ],
+    "median_ms": 99075.577945
+  },
+  "claude/greywall": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      116707.704551
+    ],
+    "median_ms": 116707.704551
+  },
+  "claude/ouro": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      88441.117561
+    ],
+    "median_ms": 88441.117561
+  },
+  "opencode/mxc": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      125034.746338
+    ],
+    "median_ms": 125034.746338
+  },
+  "opencode/direct": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      149207.344071
+    ],
+    "median_ms": 149207.344071
+  },
+  "opencode/ouro": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      121083.361917
+    ],
+    "median_ms": 121083.361917
+  },
+  "opencode/greywall": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      199835.08464
+    ],
+    "median_ms": 199835.08464
+  },
+  "codex/ouro": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      58936.916664
+    ],
+    "median_ms": 58936.916664
+  },
+  "codex/mxc": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      57996.463198
+    ],
+    "median_ms": 57996.463198
+  },
+  "codex/greywall": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      84098.881672
+    ],
+    "median_ms": 84098.881672
+  },
+  "codex/direct": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      45914.512379
+    ],
+    "median_ms": 45914.512379
+  }
+}

@@ -1,0 +1,3 @@
+Fixed `src/parse.py`: `first_word()` now returns `parts[0]` instead of `parts[1]`.
+
+Both tests pass with `python3 -m unittest discover -s tests -v`. Tests were not modified.
