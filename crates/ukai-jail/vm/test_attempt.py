@@ -132,6 +132,50 @@ class AttemptTests(unittest.TestCase):
         self.assertEqual((self.root / 'out' / 'workspace' / 'output.txt').read_text(), 'created\n')
         self.assertFalse((self.root / 'out' / 'guest.raw').exists())
 
+    def planted(self, links):
+        """A clone step that pre-plants symlinks in out/, playing a same-uid adversary."""
+        def clone(base, destination):
+            shutil.copyfile(base, destination)
+            for name, target in links.items():
+                link = self.root / 'out' / name
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(target)
+        return clone
+
+    def test_a_symlinked_intermediate_export_directory_is_refused(self):
+        sensitive = self.root / 'sensitive'
+        sensitive.mkdir()
+        clone = self.planted({'workspace/sub': sensitive})
+        code, report, _ = self.attempt({'guest': True, 'outputs': [
+            ['workspace', 'sub/output.txt', 'stolen\n']]}, clone=clone)
+        self.assertEqual((code, report['status']), (125, 'failed'), report)
+        self.assertEqual(list(sensitive.iterdir()), [])
+
+    def test_a_symlink_at_the_exported_name_is_refused(self):
+        sensitive = self.root / 'sensitive'
+        sensitive.mkdir()
+        clone = self.planted({'workspace/link': sensitive / 'secret'})
+        code, report, _ = self.attempt({'guest': True, 'outputs': [
+            ['workspace', 'link', 'stolen\n']]}, clone=clone)
+        self.assertEqual((code, report['status']), (125, 'failed'), report)
+        self.assertFalse((sensitive / 'secret').exists())
+
+    def test_workspace_nested_inside_output_is_refused(self):
+        workspace = self.root / 'out' / 'workspace'
+        workspace.mkdir(parents=True)
+        args = argparse.Namespace(image=self.image, workspace=workspace, out=self.root / 'out',
+                                  profile='tool', wall=30, keep_disk=False, command=['/bin/true'])
+        with self.assertRaisesRegex(ValueError, 'output must be outside the input workspace'):
+            run.execute(args)
+
+    def test_a_nested_export_still_lands_inside_the_output(self):
+        code, report, _ = self.attempt({'guest': True, 'outputs': [
+            ['workspace', 'build/sub/output.txt', 'created\n'],
+            ['evidence', 'jail.json', json.dumps(RECEIPT)]]})
+        self.assertEqual((code, report['status']), (3, 'completed'), report)
+        self.assertEqual((self.root / 'out' / 'workspace' / 'build' / 'sub' / 'output.txt').read_text(),
+                         'created\n')
+
     def test_unverified_receipt_fails_the_attempt(self):
         receipt = dict(RECEIPT, lifetime={'tree_empty': False, 'integrity': 'verified'})
         code, report, _ = self.attempt({'guest': True, 'outputs': [['evidence', 'jail.json', json.dumps(receipt)]]})

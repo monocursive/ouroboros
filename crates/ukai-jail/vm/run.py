@@ -374,10 +374,27 @@ class Transport:
         self.export_bytes += len(payload)
         if self.exported > MAX_FILES or self.export_bytes > MAX_BYTES or len(payload) > MAX_FILE:
             raise ValueError('export limit exceeded')
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open('xb') as destination:
+        # The guest names the path, so every component below the attempt directory
+        # is created or descended through directory descriptors without following
+        # links: a pre-planted symlink must not steer the write outside of it.
+        relative = path.parent.relative_to(self.attempt.output)
+        directory = os.open(self.attempt.output, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for name in relative.parts:
+                try:
+                    os.mkdir(name, 0o700, dir_fd=directory)
+                except FileExistsError:
+                    pass
+                descended = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=directory)
+                os.close(directory)
+                directory = descended
+            opened = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
+        finally:
+            os.close(directory)
+        with os.fdopen(opened, 'wb') as destination:
             destination.write(payload)
-        path.chmod(0o700 if response['executable'] else 0o600)
+            os.fchmod(destination.fileno(), 0o700 if response['executable'] else 0o600)
 
 
 class Attempt:
@@ -522,7 +539,7 @@ def execute(args):
     if not workspace.is_dir():
         raise ValueError('workspace must be a directory')
     output = args.out.resolve()
-    if output == workspace or output.is_relative_to(workspace):
+    if output == workspace or output.is_relative_to(workspace) or workspace.is_relative_to(output):
         raise ValueError('output must be outside the input workspace')
     entries = snapshot(workspace)
     metadata = load_image(image)
