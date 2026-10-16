@@ -508,7 +508,11 @@ pub(super) fn check_program_placement(
                     grant.display()
                 )));
             }
-            if let Some(alias) = super::alias_conflict(&writable, link, crate::program::KEY)? {
+            // Where the link lives: its directory, never followed (the
+            // link itself would be followed to its target, which the root
+            // and executable checks below judge).
+            let holder = link.parent().unwrap_or(Path::new("/"));
+            if let Some(alias) = super::alias_conflict(&writable, holder, crate::program::KEY)? {
                 return Err(refuse_link(format!(
                     "is reached from a child-writable root through the bind alias {}",
                     alias.display()
