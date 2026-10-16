@@ -593,7 +593,20 @@ impl<'a> Attempt<'a> {
         }
         // A detected integrity loss reaches the receipt now, not only at the
         // end.
-        if !Integrity::Lost.is(&self.record.lifetime.integrity) && running.integrity_lost() {
+        let marker_vanished = self
+            .uncontained
+            .as_mut()
+            .is_some_and(state::UncontainedRun::verify_live);
+        if marker_vanished {
+            eprintln!(
+                "ukai-jail: warning: a live uncontained-run marker was deleted or left \
+                 unpinned while the run is live; it was rewritten, and the settled marker \
+                 will refuse every trusted configuration file until checked"
+            );
+        }
+        if !Integrity::Lost.is(&self.record.lifetime.integrity)
+            && (running.integrity_lost() || marker_vanished)
+        {
             self.record.lifetime.integrity = Integrity::Lost.as_str().to_owned();
             self.record.lifetime.tree_empty = None;
             self.record.lifetime.verified_at = None;

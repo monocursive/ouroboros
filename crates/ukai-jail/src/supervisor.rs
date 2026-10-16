@@ -1172,7 +1172,14 @@ fn operator_owned(metadata: &std::fs::Metadata) -> std::io::Result<()> {
 /// that re-saves the file later — a line in a shell rc file, a crontab
 /// entry, a `systemd --user` timer — dates it after the marker. The child
 /// was the operator for the run's duration; the markers only bound what it
-/// wrote directly.
+/// wrote directly. A child that deletes the live marker itself is detected
+/// while the run is live ([`state::UncontainedRun::verify_live`]): the
+/// marker is rewritten and the settled marker then records the loss, which
+/// makes every trusted file refuse until the operator checks the
+/// configuration and clears it (audit 2026-10-15 M1); the interval between
+/// the deletion and the next supervision poll remains, as detection, not a
+/// promise. A marker whose inode could not be pinned at arming reads the
+/// same way — a loss the run could not verify is not dated across either.
 ///
 /// Absent files are not this guard's business (their absence is reported by
 /// the readers); an unreadable ctime on an existing file fails closed.
@@ -1186,7 +1193,7 @@ fn refuse_stale_trusted_file(
     epoch: &state::UncontainedEpoch,
     key: &str,
 ) -> Result<(), JailError> {
-    if epoch.live.is_empty() && epoch.settled.is_none() {
+    if epoch.live.is_empty() && epoch.settled.is_none() && epoch.undatable.is_none() {
         return Ok(());
     }
     let metadata = match std::fs::symlink_metadata(path) {
@@ -1194,6 +1201,26 @@ fn refuse_stale_trusted_file(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(usage(key, format!("{}: {error}", path.display()))),
     };
+    if epoch.undatable.is_some() {
+        let marker = epoch
+            .undatable
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("uncontained.epoch"));
+        return Err(JailError::new(
+            ErrorCode::UnsafeConfigPath,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            format!(
+                "{} cannot be trusted: an uncontained (`--profile none`) run's live marker was \
+                 deleted or could not be verified while that run was live ({}), so no file \
+                 can be dated across it. Check the trusted configuration, then remove {}",
+                path.display(),
+                marker.display(),
+                marker.display()
+            ),
+        )
+        .with_key_path(key));
+    }
     let refused = |message: String| {
         JailError::new(
             ErrorCode::UnsafeConfigPath,
@@ -4272,6 +4299,29 @@ mod tests {
         assert!(journal.take_new_loss().is_none());
     }
 
+    /// Audit 2026-10-15 M1: an epoch whose settled marker recorded a lost
+    /// live marker refuses every existing trusted file outright.
+    #[test]
+    fn a_trusted_file_refuses_when_the_epoch_is_undatable() {
+        let dir = tempfile::tempdir().unwrap();
+        let trusted = dir.path().join("config.toml");
+        std::fs::write(&trusted, b"trusted").unwrap();
+        let mut epoch = state::UncontainedEpoch::default();
+        assert!(refuse_stale_trusted_file(&trusted, &epoch, "config").is_ok());
+        epoch.undatable = Some(dir.path().join("uncontained.epoch"));
+        let error = refuse_stale_trusted_file(&trusted, &epoch, "config").unwrap_err();
+        assert!(
+            error.message.contains("cannot be trusted"),
+            "{}",
+            error.message
+        );
+        // An absent file is still the reader's business, not this guard's.
+        epoch.undatable = Some(dir.path().join("uncontained.epoch"));
+        assert!(
+            refuse_stale_trusted_file(&dir.path().join("absent.toml"), &epoch, "config").is_ok()
+        );
+    }
+
     #[test]
     fn a_trusted_file_that_predates_the_uncontained_epoch_refuses() {
         let dir = tempfile::tempdir().unwrap();
@@ -4314,6 +4364,7 @@ mod tests {
         let epoch = |settled| state::UncontainedEpoch {
             settled: Some(settled),
             live: Vec::new(),
+            undatable: None,
         };
         let error = refuse_stale_trusted_file(&trusted, &epoch(changed), "config").unwrap_err();
         assert_eq!(error.code, crate::records::ErrorCode::UnsafeConfigPath);
