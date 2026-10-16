@@ -286,6 +286,7 @@ pub fn run(ctx: &Context, mut args: LearnArgs) -> Result<i32, String> {
         gate_fd: None,
         attempt_id: None,
         label_only: false,
+        quiet: true,
     };
     let report = supervisor::run_learning(ctx, &run);
     let receipt_path = report

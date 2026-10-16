@@ -65,6 +65,20 @@
 #   inspected. No shared field changed meaning: a policy with no
 #   omitted-port grant keeps its bytes and digest, and one with such a
 #   grant now digests that grant's shape.
+# - 2026-10-16 (J13, jail-launch-and-summary.md §4 and §7 decisions 5 and
+#   8) re-blessed jail-event.schema.json in place under ukai.event/1 and
+#   froze the new jail-summary.schema.json as ukai.jail.summary/1.
+#   Rationale: additive only. A proxy result may carry `fields.credentials`,
+#   the ids (never values, placeholders or digests) of the vault credentials
+#   whose placeholder the proxy replaced in a request head it sent upstream
+#   whole, sorted and unique, absent when none was; a credential lifecycle
+#   note may carry `uses_recorded: true`, which tells a reader the build
+#   records those ids (the receipt's `jail.version` cannot, since every
+#   build reports the same one), and its existing `credential_id` and
+#   `transition` are now stated. A run without a vault journals the frames
+#   it did before. New examples: event-proxy-vault.json,
+#   event-note-credential.json and summary-agent.json (product output).
+#   No shared field changed meaning.
 schema = "ukai.jail.frozen-schemas/1"
 milestone = "milestone-1"
 
@@ -80,7 +94,7 @@ sha256 = "912d2f344762ffc08700195a10b692aae986c4d2397cdfad993e87f70a937702"
 file = "jail-event.schema.json"
 id = "urn:ukai:schema:jail-event:1"
 identifier = "ukai.event/1"
-sha256 = "bc63bd5feb57d96ad3675adacbc8f25f62d4ccfc22294cc6000930a04c750153"
+sha256 = "24961911b0083c6b212aeb7a711adb1fe7954fcfadb88bd51b48913ba13469fe"
 
 # §13.2: the receipt
 [[frozen]]
@@ -243,6 +257,13 @@ sha256 = "4bf6b7b9a1ff973dcfe1504c837039dc3323234fffa778692d05a2a7af4c91fb"
 file = "fixtures/trace-tool.json"
 identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
 sha256 = "1c93bdf014b5508d5abf0b2c17b31ea863e8de87d0af18416194dc93206cbd33"
+
+# J13 (jail-launch-and-summary.md §4.5): `tail --summary --json`
+[[frozen]]
+file = "jail-summary.schema.json"
+id = "urn:ukai:schema:jail-summary:1"
+identifier = "ukai.jail.summary/1"
+sha256 = "3c25feb05031e263b69924cc57cc230041aab25a98879f2c866b09c560ede3d6"
 
 [[frozen]]
 file = "learned-policy.schema.json"

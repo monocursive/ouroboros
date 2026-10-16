@@ -112,7 +112,7 @@ fn print_json(value: &serde_json::Value) {
 /// The schema identifiers this build announces, by name, in the order the
 /// text rendering prints them (§4: "the schema identifiers that `ukai
 /// version --json` announces are constants tested against those files").
-const SCHEMAS: [(&str, &str); 10] = [
+const SCHEMAS: [(&str, &str); 11] = [
     ("receipt", SCHEMA_RECEIPT),
     ("event", SCHEMA_EVENT),
     ("policy", SCHEMA_POLICY),
@@ -123,6 +123,8 @@ const SCHEMAS: [(&str, &str); 10] = [
     ("network", SCHEMA_NETWORK),
     ("learned_policy", records::SCHEMA_LEARNED_POLICY),
     ("doctor", SCHEMA_DOCTOR),
+    // J13: `tail --summary --json`
+    ("summary", ukai_jail::summary::SCHEMA_SUMMARY),
 ];
 
 fn schema_identifiers() -> serde_json::Value {
@@ -794,15 +796,41 @@ fn run(context: &Context, args: &RunArgs) -> ExitCode {
     }
     if let Some(path) = &report.receipt_path
         && report.receipt.is_some()
+        && !(args.quiet || report.quiet)
         && stderr_is_a_terminal()
     {
         // §8.3: the child's stderr is inherited without capture. Writing the
         // supervisor's own diagnostic into it would make the stream differ
-        // from direct execution (X05), so the line goes out only when a
-        // terminal is watching, where no byte comparison is being made.
-        ukai_jail::diag!("ukai-jail: receipt {}", path.display());
+        // from direct execution (X05), so the summary and the receipt line go
+        // out only when a terminal is watching, where no byte comparison is
+        // being made. J13: the summary is computed from the final receipt and
+        // journal on disk alone, as `tail --summary` computes it, so the two
+        // print the same lines; the receipt line stays last. The exit code
+        // never depends on it.
+        print_summary(path, args.trace_fd);
     }
     exit(report.exit_code)
+}
+
+/// J13: the end-of-run summary of the attempt whose canonical receipt is
+/// `receipt`, then the receipt line. A summary that cannot be computed is
+/// said so in one line; the receipt line still prints.
+fn print_summary(receipt: &std::path::Path, trace_fd: Option<i32>) {
+    let lines = receipt
+        .parent()
+        .ok_or_else(|| "the receipt has no attempt directory".to_owned())
+        .and_then(|attempt| ukai_jail::summary::summarize_attempt(attempt, trace_fd));
+    match lines {
+        Ok(summary) => {
+            for line in summary.terminal(receipt) {
+                ukai_jail::diag!("{line}");
+            }
+        }
+        Err(error) => {
+            ukai_jail::diag!("ukai-jail: summary unavailable: {error}");
+            ukai_jail::diag!("ukai-jail: receipt {}", receipt.display());
+        }
+    }
 }
 
 /// One capability as `doctor` and `run --label-only` print it.
@@ -821,6 +849,9 @@ fn capability_line(capability: &Capability) -> String {
 // ---------------------------------------------------------------------------
 
 fn tail(context: &Context, args: &TailArgs) -> ExitCode {
+    if args.summary {
+        return tail_summary(context, args);
+    }
     let result = ukai_jail::state::data_dir(&context.env_settings, context.home.as_deref())
         .map_err(|error| error.message)
         .and_then(|data| ukai_jail::journal::attempt_path(&data, args.attempt.as_deref()))
@@ -838,6 +869,47 @@ fn tail(context: &Context, args: &TailArgs) -> ExitCode {
         Err(error) => {
             ukai_jail::diag!("tail: {error}");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// `tail --summary [--json]` (J13, §4.5): the summary of a recorded attempt
+/// on stdout, from its receipt and journal alone, through the same function
+/// as the live run. 0 when it printed one, 1 when the attempt cannot be read;
+/// never the agent's exit code.
+fn tail_summary(context: &Context, args: &TailArgs) -> ExitCode {
+    let result = ukai_jail::state::data_dir(&context.env_settings, context.home.as_deref())
+        .map_err(|error| error.message)
+        .and_then(|data| ukai_jail::journal::attempt_path(&data, args.attempt.as_deref()))
+        .and_then(|attempt| {
+            ukai_jail::summary::summarize_attempt(&attempt, None).map(|summary| (attempt, summary))
+        });
+    let (attempt, summary) = match result {
+        Ok(found) => found,
+        Err(error) => {
+            ukai_jail::diag!("tail: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stdout = std::io::stdout().lock();
+    let written = if args.json {
+        writeln!(
+            stdout,
+            "{}",
+            ukai_jail::summary::json_text(&summary.to_json())
+        )
+    } else {
+        summary
+            .terminal(&ukai_jail::summary::receipt_path(&attempt))
+            .iter()
+            .try_for_each(|line| writeln!(stdout, "{line}"))
+    };
+    match written.and_then(|()| stdout.flush()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            drop(stdout);
+            ukai_jail::diag!("tail: the output: {error}");
+            ExitCode::from(1)
         }
     }
 }

@@ -189,6 +189,25 @@ def semantic_event(event):
     violations_in_bytes(event.get("fields"), "$.fields", out)
     if is_note(event, "coverage_gap"):
         gap_interval(event["fields"], "$.fields", out)
+    # J13: a proxy result names its substituted credentials sorted (the schema
+    # states unique and non-empty; JSON Schema cannot state an order).
+    credentials = (event.get("fields") or {}).get("credentials")
+    if event.get("source") == "proxy" and isinstance(credentials, list) and credentials != sorted(credentials):
+        out.append(("proxy_credentials_sorted", "$.fields.credentials", credentials))
+    return out
+
+
+def semantic_summary(summary):
+    """J13 (jail-launch-and-summary.md §4.5): each line at most once, in the
+    order the terminal prints them, status first and evidence present."""
+    order = ["status", "workspace", "network", "credentials", "evidence", "limits", "cleanup"]
+    names = [line["line"] for line in summary["lines"]]
+    out = []
+    if names != sorted(names, key=order.index) or len(set(names)) != len(names):
+        out.append(("summary_line_order", "$.lines", names))
+    for required in ["status", "workspace", "network", "evidence"]:
+        if required not in names:
+            out.append(("summary_line_missing", "$.lines", required))
     return out
 
 
@@ -619,7 +638,7 @@ def main():
     # J5-C: an example's schema is named by its file's prefix; checked-in
     # evidence receipts are product output and held to the same contract.
     prefixes = {"event-": "jail-event", "receipt-": "jail-receipt", "gate-": "jail-gate",
-                "control-": "jail-control", "doctor-": "jail-doctor"}
+                "control-": "jail-control", "doctor-": "jail-doctor", "summary-": "jail-summary"}
     examples = sorted((ROOT / "examples").glob("*.json"))
     evidence = sorted((ROOT / "evidence").glob("*receipt*.json"))
     for file in examples + evidence:
@@ -634,6 +653,8 @@ def main():
             assert_clean(semantic_receipt(record), file.name)
         elif kind == "jail-event":
             assert_clean(semantic_event(record), file.name)
+        elif kind == "jail-summary":
+            assert_clean(semantic_summary(record), file.name)
     cases = read("fixtures/validation-cases.json")
     for case in cases:
         record = read(case["base"])

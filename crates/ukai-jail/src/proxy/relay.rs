@@ -37,6 +37,12 @@ pub(super) struct RelayOutcome {
     /// Client bytes after the first request, read and not forwarded.
     pub discarded: u64,
     pub end: EndReason,
+    /// Whether the request head (the relay's prefix: a rewritten head, or a
+    /// tunnel's early bytes) reached the upstream socket whole.
+    pub head_sent: bool,
+    /// J13: the vault credentials substituted into that head, sorted and
+    /// unique; empty unless `head_sent`.
+    pub credentials: Vec<String>,
 }
 
 /// The relay's second thread could not be started; nothing was written to
@@ -178,6 +184,8 @@ fn relay(
             bytes_out: 0,
             discarded: 0,
             end: EndReason::UpstreamError,
+            head_sent: false,
+            credentials: Vec::new(),
         });
     }
     // Only now may the worker read the client: the prefix is ahead of
@@ -197,6 +205,8 @@ fn relay(
             .saturating_add(forwarded),
         discarded,
         end,
+        head_sent: true,
+        credentials: Vec::new(),
     })
 }
 

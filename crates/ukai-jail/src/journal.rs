@@ -66,6 +66,84 @@ pub fn open(attempt: &Path, file: &str) -> io::Result<File> {
     Ok(file)
 }
 
+/// What a bounded read of one attempt file found.
+#[derive(Debug)]
+pub enum Bounded {
+    /// The file's bytes, all of them: it was no larger than the cap.
+    Bytes(Vec<u8>),
+    /// The file is larger than the cap, by its size in bytes; nothing of it
+    /// was kept.
+    TooLarge(u64),
+    /// No such file.
+    Absent,
+    /// It exists and could not be read (the error, naming the file).
+    Unreadable(String),
+}
+
+/// Reads `file` in `attempt` whole when it is at most `cap` bytes, through
+/// the same anchored open `tail` uses. A file over the cap is reported with
+/// its size and not read past the cap, so a hostile or runaway file costs at
+/// most `cap + 1` bytes of memory.
+#[must_use]
+pub fn read_bounded(attempt: &Path, file: &str, cap: u64) -> Bounded {
+    use std::io::Read as _;
+    let path = attempt.join(file);
+    let opened = match open(attempt, file) {
+        Ok(opened) => opened,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Bounded::Absent,
+        Err(error) => return Bounded::Unreadable(at(&path)(error)),
+    };
+    let size = opened.metadata().map_or(0, |metadata| metadata.len());
+    let mut bytes = Vec::new();
+    if let Err(error) = opened.take(cap.saturating_add(1)).read_to_end(&mut bytes) {
+        return Bounded::Unreadable(at(&path)(error));
+    }
+    if bytes.len() as u64 > cap {
+        return Bounded::TooLarge(size.max(bytes.len() as u64));
+    }
+    Bounded::Bytes(bytes)
+}
+
+/// The longest journal frame: one event, which the trace never writes above
+/// [`crate::trace::EVENT_MAX`] bytes, and its LF.
+pub const FRAME_MAX: usize = crate::trace::EVENT_MAX + 1;
+
+/// The frames of a journal's bytes, in order, each without its LF.
+///
+/// A frame is a line that ends in LF (jail-v1 §13.3), so a final line
+/// without one is a partial frame: it is never yielded, and
+/// [`Frames::torn`] says it was there. Like `tail`, a reader of these frames
+/// never counts a partial final frame as evidence.
+pub struct Frames<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> Frames<'a> {
+    /// Whether bytes are left that are not a complete frame: true once the
+    /// iterator is exhausted on a journal whose last line has no LF.
+    #[must_use]
+    pub fn torn(&self) -> bool {
+        !self.rest.is_empty() && !self.rest.contains(&b'\n')
+    }
+}
+
+impl<'a> Iterator for Frames<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<&'a [u8]> {
+        let end = self.rest.iter().position(|byte| *byte == b'\n')?;
+        let (frame, rest) = self.rest.split_at(end + 1);
+        self.rest = rest;
+        Some(&frame[..end])
+    }
+}
+
+/// [`Frames`] over `bytes`.
+#[must_use]
+pub fn frames(bytes: &[u8]) -> Frames<'_> {
+    Frames { rest: bytes }
+}
+
 pub fn tail(
     attempt: &Path,
     follow: bool,

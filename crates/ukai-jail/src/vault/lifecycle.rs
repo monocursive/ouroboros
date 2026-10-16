@@ -682,6 +682,17 @@ impl Lease {
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+    /// J13: the ids of the credentials this lease substituted, sorted and
+    /// unique: what a proxy result's `fields.credentials` names. Ids only,
+    /// never a value, a placeholder or a digest.
+    pub(crate) fn ids(&self) -> Vec<String> {
+        let ids: std::collections::BTreeSet<&str> = self
+            .entries
+            .iter()
+            .map(|(secret, _)| secret.id.as_str())
+            .collect();
+        ids.into_iter().map(str::to_owned).collect()
+    }
 }
 /// The receipt's `lease_poll_ms`: how often a live lease is re-checked
 /// against its source (the lease watch, and the TLS lane's wait between

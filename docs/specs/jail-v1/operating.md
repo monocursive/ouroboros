@@ -117,7 +117,9 @@ ukai-jail run [--profile agent|tool|build|none|FILE] [--launch NAME]
   [--deny-read PATH]... [--allow-host HOST[:PORT]]... [--limit KEY=VALUE]...
   [--observe on|off] [--evidence strict|best-effort]
   [--receipt PATH] [--trace-fd N] [--control-fd N] [--gate-fd N]
-  [--attempt-id ID] [--label-only] [-- PROGRAM [ARG]...]
+  [--attempt-id ID] [--label-only] [--quiet] [-- PROGRAM [ARG]...]
+ukai-jail tail [--attempt ID] [--follow] [--json] [--since TIME]
+ukai-jail tail --summary [--attempt ID] [--json]
 ukai-jail explain [--profile …] [--launch NAME] [the run overrides] [--json]
 ukai-jail doctor [--profile NAME|FILE] [--launch NAME] [--json]
 ukai-jail gc [--dry-run] [--json]
@@ -134,10 +136,22 @@ ukai-jail version [--json]
   profile `tool` (or the launch profile's), the invocation directory as
   workspace, a private scratch directory, observation on, strict evidence. The child's stdin, stdout and
   stderr are passed through untouched; `run` has no JSON mode. When stderr is
-  a terminal, `run` ends by printing `ukai-jail: receipt <path>`.
+  a terminal, `run` ends with a few summary lines and then
+  `ukai-jail: receipt <path>` (see [the end-of-run
+  summary](#the-end-of-run-summary)); `--quiet`, or `summary = false` under
+  `[jail]` in `config.toml`, prints neither, and errors still print. With
+  stderr a pipe or a file, `run` adds no byte to it.
 - **`run --label-only`** resolves and probes, prints the proposed label and
   one `capability …` line per requirement, and executes nothing. It refuses
   `--gate-fd` and `--attempt-id` (exit 2).
+- **`tail`** replays the most recently updated attempt's journal (or
+  `--attempt ID`'s), as text or as the original NDJSON lines (`--json`);
+  `--follow` waits for more until the supervisor lets go. **`tail --summary`**
+  prints that attempt's [end-of-run summary](#the-end-of-run-summary) on
+  stdout instead, the lines a terminal run printed, or with `--json` one
+  `ukai.jail.summary/1` object ([schema](jail-summary.schema.json),
+  [example](examples/summary-agent.json)). It refuses `--follow` and
+  `--since`.
 - **`explain`** resolves the policy and prints it, with every requirement
   marked unmeasured; it probes and executes nothing. `--json` gives the policy
   snapshot, its digest (`policy.digest`) and the requirement names.
@@ -163,6 +177,7 @@ ukai-jail version [--json]
 | `explain`, `doctor`, `gc`, `version`, `run --label-only` | 0 | success |
 | `explain`, `doctor`, `gc`, `version`, `run --label-only` | 1 | an operational failure (for `gc`: a failed cleanup or state access, or a cleanup that stays pending) |
 | `doctor`, `run --label-only` | 125 | the requested plan is unsupported or unavailable on this host (always on macOS) |
+| `tail --summary` | 0 / 1 | it printed a summary / the attempt or its receipt cannot be read (never the agent's code) |
 
 A child that itself exits 125 is recorded as `exited` with code 125, not as a
 refusal; the receipt tells them apart. JSON output never changes an exit code.
@@ -566,6 +581,59 @@ Under `--evidence strict` (the default) any loss of evidence stops the
 command; under `best-effort` the command continues and the receipt marks the
 lost intervals. In both, a degraded evidence class is an `evidence_lost` error
 and exit 1.
+
+## The end-of-run summary
+
+A terminal run ends with at most eight lines, computed from the final
+`jail.json` and the attempt's `trace.ndjson` alone, by the same function as
+`tail --summary`:
+
+```text
+ukai-jail: settled · exited 0 · 3m41s exec→settled · survivors: none (verified)
+ukai-jail: workspace: 2 paths opened for writing, 2 in renames, 1 removed · 1 refused write
+ukai-jail: network: allowed api.example.test:443 (41) · denied github.com:443 (1)
+ukai-jail: credential api: vault, never staged · used on 41 proxy results · 0 credential refusals
+ukai-jail: evidence: 6/6 classes active, no gaps · reads and file contents are not observed
+ukai-jail: receipt /home/u/.local/share/ukai/attempts/att_…/jail.json
+```
+
+- **Status**: the phase (`NOT settled (<phase>)` when the run did not
+  settle), the outcome, the time from the confirmed exec to the settled
+  receipt on the supervisor's clock (the receipt's wall clock, labelled so,
+  when there is no journal), whether the tree was verified dead (`registered
+  cgroup only` under `none`), and the error codes (`tree_unknown` says to run
+  `ukai-jail gc`).
+- **Workspace**: distinct workspace paths in successful `fs.create` and
+  `fs.write` results ("opened for writing", which proves neither that bytes
+  were written nor that a file was new), on either side of a rename, and
+  unlinked; results whose path has no name; refused writes, which outside the
+  known roots are digests and so are counted, never named.
+- **Network**: proxy results by destination and decision. The unit is a proxy
+  result (a tunnel, or one request on the vault's TLS lane), not a request.
+- **Credentials**: for a vault credential, the proxy results whose upstream
+  request head carried its substituted value (`fields.credentials` on the
+  result), which says the value was sent, not that it was accepted; a staged
+  (`copy_rw`, `bind_ro`) credential is readable by the agent and has no use
+  to count.
+- **Evidence**, then **limits** that were hit or not applied, and pending
+  vendor-state cleanup or an uncontained (`none`) run, when there are any.
+
+A number is printed only where the evidence supports it. It is exact only
+for an `active` class whose complete journal (its last line the note of this
+receipt, every source's `source_seq` increasing without an unrecorded hole)
+holds exactly the receipt's `observed_count` for the class; a `degraded`
+class or an incomplete journal prints `at least`; an unobserved class prints
+`not observed`, never `0`; a journal that disagrees with its receipt prints
+`journal and receipt disagree on <class>` and no number for it. A journal
+over 16 MiB is not scanned and says so; under `--trace-fd` there is no local
+journal. Uses of a vault credential in a journal written before proxy
+results named their credentials print `uses not recorded`. Nothing about
+reads or file contents is counted, because neither is observed.
+Every child-chosen string is escaped as in every other text rendering.
+[`summary_check.py`](summary_check.py) recomputes every number of a
+`tail --summary --json` object from the archived receipt and journal, with
+no code of this tool:
+`python3 -I summary_check.py <attempt-dir> <summary.json>`.
 
 ## Observation cost
 

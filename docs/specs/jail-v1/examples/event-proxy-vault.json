@@ -1,0 +1,35 @@
+{
+  "schema": "ukai.event/1",
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "source": "proxy",
+  "source_seq": 3,
+  "observed_at": "2026-09-21T12:00:00Z",
+  "monotonic_ns": "340000000",
+  "operation": "net.connect",
+  "stage": "result",
+  "decision": "allow",
+  "outcome": {
+    "ok": true,
+    "return_value": null,
+    "errno": null,
+    "completion": "proxy_close",
+    "bytes_in": 4096,
+    "bytes_out": 512,
+    "duration_ms": 120
+  },
+  "fields": {
+    "transport": "http",
+    "origin": "api.example.test",
+    "origin_verification": "mitm_http_host",
+    "request_id": 3,
+    "kind": "connect",
+    "destination": "api.example.test:443",
+    "reason": "relayed",
+    "connected_address": "192.0.2.10:443",
+    "discarded_bytes": 0,
+    "end": "upstream_closed",
+    "credentials": [
+      "api"
+    ]
+  }
+}

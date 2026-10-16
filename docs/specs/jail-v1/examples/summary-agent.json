@@ -1,0 +1,116 @@
+{
+  "attempt_id": "att_00000000-0000-4000-8000-000000000001",
+  "journal": "complete",
+  "lines": [
+    {
+      "facts": {
+        "attempt_wall_ms": null,
+        "cause": null,
+        "code": 0,
+        "errors": [],
+        "exec_to_settled_ms": 221000,
+        "integrity": "verified",
+        "outcome": "exited",
+        "phase": "settled",
+        "signal": null,
+        "survivors": "none_verified"
+      },
+      "line": "status",
+      "text": "settled · exited 0 · 3m41s exec→settled · survivors: none (verified)"
+    },
+    {
+      "facts": {
+        "bound": "exact",
+        "omitted": 0,
+        "opened_for_writing": 2,
+        "paths": [
+          {
+            "kind": "workspace_relative",
+            "value": "old.log"
+          },
+          {
+            "kind": "workspace_relative",
+            "value": "src/parser.rs"
+          },
+          {
+            "kind": "workspace_relative",
+            "value": "src/parser.rs.tmp"
+          }
+        ],
+        "refused": 1,
+        "refused_bound": "exact",
+        "removed": 1,
+        "renamed": 2,
+        "unnamed": 0
+      },
+      "line": "workspace",
+      "text": "workspace: 2 paths opened for writing, 2 in renames, 1 removed · 1 refused write"
+    },
+    {
+      "facts": {
+        "allowed": [
+          {
+            "connect_failed": 0,
+            "destination": "api.example.test:443",
+            "results": 41
+          }
+        ],
+        "bound": "exact",
+        "denied": [
+          {
+            "destination": "github.com:443",
+            "reason": "host_not_allowed",
+            "results": 1
+          }
+        ],
+        "mode": "proxy",
+        "omitted": 0,
+        "resolver_refused": null
+      },
+      "line": "network",
+      "text": "network: allowed api.example.test:443 (41) · denied github.com:443 (1)"
+    },
+    {
+      "facts": {
+        "credentials": [
+          {
+            "id": "api",
+            "mode": "vault",
+            "never_staged": true,
+            "transitions": [
+              "loaded"
+            ],
+            "uses": 41,
+            "uses_bound": "exact"
+          }
+        ],
+        "omitted": 0,
+        "refusals": 0,
+        "refusals_bound": "exact"
+      },
+      "line": "credentials",
+      "text": "credential api: vault, never staged · used on 41 proxy results · 0 credential refusals"
+    },
+    {
+      "facts": {
+        "attached": true,
+        "classes": {
+          "exec": "active",
+          "fs.deny": "active",
+          "fs.write": "active",
+          "limits": "active",
+          "net": "active",
+          "proxy.net": "active"
+        },
+        "disagree": [],
+        "evidence": "strict",
+        "gaps": [],
+        "observe": "on"
+      },
+      "line": "evidence",
+      "text": "evidence: 6/6 classes active, no gaps · reads and file contents are not observed"
+    }
+  ],
+  "receipt_digest": "sha256:fcee6666583dafe722080149dabcf50c9c921c88558c09b18c34209d18b638c3",
+  "schema": "ukai.jail.summary/1"
+}

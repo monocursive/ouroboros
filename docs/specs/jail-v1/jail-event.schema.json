@@ -722,6 +722,87 @@
           }
         ]
       }
+    },
+    {
+      "$comment": "jail-launch-and-summary.md §4.3 and §7 decision 5 (J13): a proxy result may name, by id only (never a value, placeholder or digest), the vault credentials whose placeholder the proxy replaced in a request head it sent upstream whole on that connection. Sorted and unique (validate_contract.py checks the order); absent when none was substituted, so a run without a vault journals the frames it did before.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "proxy"
+          }
+        },
+        "required": [
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "properties": {
+              "credentials": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "uniqueItems": true
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "jail-launch-and-summary.md §4.2 (J13): a credential lifecycle note may carry uses_recorded, true, when the build that wrote it names substituted credentials on its proxy results; a journal without it predates that field, and its silence is not a zero.",
+      "if": {
+        "properties": {
+          "source": {
+            "const": "wrapper"
+          },
+          "operation": {
+            "const": "note"
+          },
+          "fields": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "credential"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "fields",
+          "operation",
+          "source"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "credential_id",
+              "transition"
+            ],
+            "properties": {
+              "credential_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "transition": {
+                "$ref": "#/$defs/name"
+              },
+              "uses_recorded": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "description": "Frozen at jail milestone 1 (jail-v1 §13.1, §17). The restriction of ukai.event/1 to what ukai-jail writes: its wrapper notes, audit fields and proxy results. It carries no identifier of its own: its events are ukai.event/1 events.",

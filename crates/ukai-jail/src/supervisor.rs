@@ -117,6 +117,10 @@ pub struct RunReport {
     /// they were raised. The caller prints each one on stderr whole: an
     /// error that cannot reach the receipt still reaches the operator.
     pub unrecorded: Vec<crate::records::ErrorObject>,
+    /// J13: the operator's `config.toml` turned the end-of-run summary off
+    /// (`[jail] summary = false`), so it and the receipt line stay unprinted
+    /// unless asked for. Presentation only: no policy input reads it.
+    pub quiet: bool,
 }
 
 /// What `explain` established, without probing anything.
@@ -184,6 +188,9 @@ pub struct Plan {
     pub config_dir: PathBuf,
     /// The state directory in use.
     pub data_dir: PathBuf,
+    /// J13: `[jail] summary = false` in the operator's `config.toml`.
+    /// Presentation only: it is not part of the snapshot or its digest.
+    pub quiet: bool,
 }
 
 impl Plan {
@@ -320,6 +327,7 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
         workspace,
         config_dir,
         data_dir,
+        quiet: operator_jail.summary == Some(false),
     };
     check_record_bounds(ctx, &plan)?;
     Ok(plan)
@@ -1504,10 +1512,13 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
     let budget = Budget::new(PREPARE_BUDGET);
     // Step 1: allocate and lock private state before anything else exists.
     let attempt_id = supplied_attempt_id.unwrap_or_else(AttemptId::generate);
+    let quiet = plan.quiet;
     let attempt = Attempt::claim(ctx, args, plan, attempt_id, budget, signals, argv_digest)?;
     // From the claim on, every exit writes a receipt (I01): `run` returns a
     // report, never an error.
-    Ok(attempt.run(request, argv))
+    let mut report = attempt.run(request, argv);
+    report.quiet = quiet;
+    Ok(report)
 }
 
 /// The usage rules of §6.1 that clap does not express, and the supplied
@@ -5516,6 +5527,7 @@ mod tests {
             workspace: PathBuf::from("/work"),
             config_dir: PathBuf::from("/config"),
             data_dir: PathBuf::from("/data"),
+            quiet: false,
         });
         assert_eq!(applied.network.mode, "host");
         assert!(applied.filesystem.is_none());
@@ -5535,6 +5547,7 @@ mod tests {
             workspace,
             config_dir: config_dir.clone(),
             data_dir: root.path().join("data"),
+            quiet: false,
         };
         // A workspace that covers the launch directory refuses, naming the
         // config directory the launch directory hangs off.
@@ -5564,6 +5577,7 @@ mod tests {
             workspace,
             config_dir: config_dir.clone(),
             data_dir: root.path().join("data"),
+            quiet: false,
         };
         // A workspace that covers the config directory refuses.
         let check = |plan: Plan| check_config_isolation(&plan, &ChildRoots::of(&plan));
@@ -5673,6 +5687,7 @@ mod tests {
             workspace: root.path().join("workspace"),
             config_dir: root.path().join("config"),
             data_dir: data,
+            quiet: false,
         };
         (root, attempt_dir, plan)
     }

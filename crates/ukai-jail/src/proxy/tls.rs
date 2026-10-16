@@ -98,6 +98,8 @@ pub(super) fn relay(connection: &Connection<'_>) -> Result<RelayOutcome, Failure
         bytes_out: 0,
         discarded: 0,
         end: EndReason::UpstreamClosed,
+        head_sent: false,
+        credentials: Vec::new(),
     };
     match relay_inner(connection, &mut progress) {
         Ok(()) => Ok(progress),
@@ -145,14 +147,20 @@ fn relay_inner(connection: &Connection<'_>, outcome: &mut RelayOutcome) -> Resul
     )?;
     incoming.sock.deadline = lifetime;
     lease.check()?;
-    forward(
+    let forwarded = forward(
         &mut incoming,
         &mut outgoing,
         &mut request,
         length,
         connection.chunk,
         outcome,
-    )?;
+    );
+    // J13: once the substituted head reached the upstream whole, its
+    // credentials were used, whatever happens to the body or the response.
+    if outcome.head_sent {
+        outcome.credentials = lease.ids();
+    }
+    forwarded?;
     let response = read_response(&mut outgoing, &watch, lifetime)?;
     let switched = response.starts_with(b"HTTP/1.1 101 ");
     if switched {
@@ -291,6 +299,7 @@ fn forward(
     sent.map_err(|_| Reason::ConnectFailed)?;
     outgoing.flush().map_err(|_| Reason::ConnectFailed)?;
     outcome.bytes_out = head_bytes;
+    outcome.head_sent = true;
     let mut buffer = zeroize::Zeroizing::new(vec![0u8; chunk.max(1)]);
     let mut remaining_body = length;
     while remaining_body != 0 {
@@ -806,6 +815,8 @@ mod tests {
             bytes_out: 0,
             discarded: 0,
             end: EndReason::UpstreamClosed,
+            head_sent: false,
+            credentials: Vec::new(),
         };
         let pumped = pump(
             vault.server(&target).unwrap(),
@@ -854,6 +865,8 @@ mod tests {
             bytes_out: 0,
             discarded: 0,
             end: EndReason::UpstreamClosed,
+            head_sent: false,
+            credentials: Vec::new(),
         };
         let started = Instant::now();
         let pumped = pump(

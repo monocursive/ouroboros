@@ -160,6 +160,10 @@ pub struct RunArgs {
     /// Resolve, probe and print the proposed label without executing.
     #[arg(long = "label-only")]
     pub label_only: bool,
+    /// Print neither the end-of-run summary nor the receipt line; errors
+    /// still print.
+    #[arg(long)]
+    pub quiet: bool,
     /// PROGRAM and its arguments, after `--`.
     #[arg(
         last = true,
@@ -238,12 +242,17 @@ pub struct TailArgs {
     /// Follow until the supervisor releases its attempt lock.
     #[arg(long)]
     pub follow: bool,
-    /// Write original NDJSON envelopes without re-encoding them.
+    /// Write original NDJSON envelopes without re-encoding them; with
+    /// --summary, the summary as one ukai.jail.summary/1 object.
     #[arg(long)]
     pub json: bool,
     /// Include events at or after this UTC timestamp.
     #[arg(long)]
     pub since: Option<String>,
+    /// Print the attempt's end-of-run summary, computed from its receipt and
+    /// journal, instead of its events.
+    #[arg(long, conflicts_with_all = ["follow", "since"])]
+    pub summary: bool,
 }
 
 /// Candidate-policy generation. Proposals never load automatically.

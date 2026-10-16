@@ -60,6 +60,7 @@ pub mod profiles;
 pub mod proxy;
 pub mod records;
 pub mod state;
+pub mod summary;
 pub mod supervisor;
 pub(crate) mod sync;
 pub(crate) mod sys;

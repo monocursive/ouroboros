@@ -1085,6 +1085,216 @@ mod tests {
         );
     }
 
+    /// One plain absolute-form request through a vault proxy to a local
+    /// plaintext upstream bound to the secret: the result and the bytes the
+    /// upstream received.
+    fn run_plain(first: impl Fn(u16) -> String) -> (ProxyResult, Vec<u8>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return Vec::new();
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let bytes = head(&mut socket).unwrap_or_default();
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK");
+            bytes
+        });
+        let vault = vault_of(
+            policy(&[&format!("http://fixture.test:{port}")]),
+            b"Bearer fixture-secret",
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("proxy.sock");
+        let resolver = FixtureResolver::new();
+        resolver.script(
+            "fixture.test",
+            vec![FixtureAnswer::Addresses(vec!["127.0.0.1".parse().unwrap()])],
+        );
+        let (sender, receiver) = mpsc::channel();
+        let proxy = proxy::start_with_vault(
+            ProxyConfig {
+                listener: UnixListener::bind(&path).unwrap(),
+                // A name resolving to loopback is refused unless the address
+                // itself is granted too, as in `run_tls`.
+                rules: Rules::from_strings(
+                    &[format!("fixture.test:{port}"), format!("127.0.0.1:{port}")],
+                    &[],
+                )
+                .unwrap(),
+                budgets: Budgets::default(),
+                resolver: Arc::new(resolver),
+            },
+            Arc::new(Sink(Mutex::new(sender))),
+            Some(Arc::new(vault)),
+        )
+        .unwrap();
+        let mut socket = UnixStream::connect(path).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        socket
+            .write_all(&origin::preamble_for(
+                ([127, 0, 0, 1], 40000).into(),
+                HTTP_PORT,
+            ))
+            .unwrap();
+        socket.write_all(first(port).as_bytes()).unwrap();
+        let mut response = Vec::new();
+        let _ = socket.read_to_end(&mut response);
+        let event = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(proxy.stop(Duration::from_secs(10)).complete());
+        // A refused request never connects; the server is released by a
+        // connection of its own.
+        if event.connected.is_none() {
+            let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        }
+        (event, server.join().unwrap())
+    }
+
+    /// The recorded form of a result: its `ukai.event/1` frame as JSON.
+    fn recorded(result: &ProxyResult) -> serde_json::Value {
+        serde_json::to_value(proxy::proxy_event(
+            result,
+            "att_00000000-0000-4000-8000-000000000001",
+            1,
+            std::time::SystemTime::now(),
+            1,
+        ))
+        .unwrap()
+    }
+
+    /// J13, K53: a proxy result names, by id only, the credentials whose
+    /// placeholder the proxy replaced in a request head it sent upstream
+    /// whole; never a value, a placeholder or a digest; nothing for a
+    /// request that carried none or was refused before its head was sent.
+    #[test]
+    fn k53_a_result_names_the_credentials_its_upstream_request_carried() {
+        use sha2::Digest as _;
+        let exposed = |frame: &serde_json::Value| {
+            let text = frame.to_string();
+            let digest = format!("{:x}", sha2::Sha256::digest(b"Bearer fixture-secret"));
+            ["fixture-secret", "vault:test-attempt:api", &digest]
+                .iter()
+                .any(|needle| text.contains(needle))
+        };
+        // The TLS lane: substituted and relayed.
+        let (event, upstream, _) = run_tls(true, true, authorized_get(true), b"", true);
+        assert_eq!(event.reason, Reason::Relayed);
+        assert!(upstream.windows(14).any(|s| s == b"fixture-secret"));
+        assert_eq!(event.credentials, vec!["api".to_owned()]);
+        let frame = recorded(&event);
+        assert_eq!(frame["fields"]["credentials"], serde_json::json!(["api"]));
+        assert!(!exposed(&frame), "{frame}");
+        // Relayed without a placeholder: nothing was substituted.
+        let (event, _, _) = run_tls(
+            true,
+            true,
+            |port| format!("GET / HTTP/1.1\r\nHost: fixture.test:{port}\r\n\r\n"),
+            b"",
+            true,
+        );
+        assert_eq!(event.reason, Reason::Relayed);
+        assert!(event.credentials.is_empty());
+        assert!(recorded(&event)["fields"].get("credentials").is_none());
+        // Refused before the head was sent: no use.
+        for (authorized, matching_host, body) in [
+            (false, true, ""),
+            (true, false, ""),
+            (true, true, "Transfer-Encoding: chunked\r\n"),
+        ] {
+            let (event, upstream, _) = run_tls(
+                true,
+                authorized,
+                move |port| {
+                    format!(
+                        "POST / HTTP/1.1\r\nHost: {}:{port}\r\nAuthorization: \
+                         vault:test-attempt:api\r\n{body}\r\n",
+                        if matching_host {
+                            "fixture.test"
+                        } else {
+                            "other.test"
+                        }
+                    )
+                },
+                b"",
+                false,
+            );
+            assert_ne!(event.reason, Reason::Relayed);
+            assert!(upstream.is_empty());
+            assert!(event.credentials.is_empty(), "{:?}", event.reason);
+            assert!(recorded(&event)["fields"].get("credentials").is_none());
+        }
+
+        // The plain lane: substituted and relayed.
+        let authorized = |port: u16| {
+            format!(
+                "GET http://fixture.test:{port}/ HTTP/1.1\r\nHost: fixture.test:{port}\r\n\
+                 Authorization: vault:test-attempt:api\r\n\r\n"
+            )
+        };
+        let (event, upstream) = run_plain(authorized);
+        assert_eq!(event.reason, Reason::Relayed);
+        assert!(upstream.windows(14).any(|s| s == b"fixture-secret"));
+        assert_eq!(event.credentials, vec!["api".to_owned()]);
+        assert!(!exposed(&recorded(&event)));
+        // A placeholder outside its declared placement is refused, unsent.
+        let (event, upstream) = run_plain(|port| {
+            format!(
+                "GET http://fixture.test:{port}/ HTTP/1.1\r\nHost: fixture.test:{port}\r\n\
+                 X-Api-Key: vault:test-attempt:api\r\n\r\n"
+            )
+        });
+        assert_eq!(event.reason, Reason::CredentialPlacementDenied);
+        assert!(upstream.is_empty());
+        assert!(event.credentials.is_empty());
+    }
+
+    /// K53: the ids a lease names are sorted and unique, whatever order and
+    /// how often the head carried them.
+    #[test]
+    fn k53_a_lease_names_its_credentials_sorted_and_once() {
+        let secret = |id: &str, header: Option<Header>| {
+            Arc::new(
+                Secret::new(
+                    id.into(),
+                    Policy {
+                        header,
+                        ..policy(&["https://fixture.test"])
+                    },
+                    b"fixture-secret".to_vec(),
+                )
+                .unwrap(),
+            )
+        };
+        let vault = Vault::new(
+            "test-attempt",
+            vec![
+                secret(
+                    "zeta",
+                    Some(Header {
+                        name: "x-api-key".into(),
+                        prefix: None,
+                    }),
+                ),
+                secret("api", None),
+            ],
+        )
+        .unwrap();
+        let mut request = proxy::http::parse_request(
+            b"GET http://fixture.test:443/ HTTP/1.1\r\nHost: fixture.test:443\r\n\
+              x-api-key: vault:test-attempt:zeta\r\nAuthorization: vault:test-attempt:api\r\n\
+              x-api-key: vault:test-attempt:zeta\r\n\r\n",
+        )
+        .unwrap();
+        let lease = inject(&vault, "https", &mut request).expect("both substitute");
+        assert_eq!(lease.ids(), vec!["api".to_owned(), "zeta".to_owned()]);
+        assert!(lifecycle::Lease::default().ids().is_empty());
+    }
+
     #[test]
     fn header_declarations_are_validated() {
         let policy = |header: Header| Policy {

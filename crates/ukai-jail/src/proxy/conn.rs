@@ -109,6 +109,7 @@ impl ResultSlot<'_> {
             discarded_bytes: 0,
             duration: self.accepted_at.elapsed(),
             end: None,
+            credentials: Vec::new(),
         }
     }
 
@@ -124,6 +125,7 @@ impl ResultSlot<'_> {
         result.bytes_out = outcome.bytes_out;
         result.discarded_bytes = outcome.discarded;
         result.end = Some(end);
+        result.credentials = outcome.credentials.clone();
         result
     }
 
@@ -429,6 +431,9 @@ fn connect_and_relay(
         );
         return Ok(());
     }
+    // J13: the credentials this request carries, named in its result once
+    // its substituted head reached the upstream whole.
+    let substituted = lease.ids();
     let watch = crate::vault::lifecycle::Watch::start(
         Arc::new(lease),
         client.clone(),
@@ -449,7 +454,7 @@ fn connect_and_relay(
             inner.forward_head.zeroize();
         }
     }
-    let Ok(outcome) = relayed else {
+    let Ok(mut outcome) = relayed else {
         // The relay could not start; nothing was written to either side.
         let _ = upstream.stream.shutdown(Shutdown::Both);
         // A tunnel already answered with its establishment reply; a plain
@@ -465,6 +470,9 @@ fn connect_and_relay(
         slot.emit(slot.allowed(Reason::ResourceExhausted, Some(upstream.address)));
         return Ok(());
     };
+    if outcome.head_sent {
+        outcome.credentials = substituted;
+    }
     let end = if watch.revoked() {
         EndReason::CredentialRevoked
     } else if shared.is_stopping() {
@@ -623,6 +631,9 @@ fn relay_tls_lane(
             event.bytes_in = failure.progress.bytes_in;
             event.bytes_out = failure.progress.bytes_out;
             event.discarded_bytes = failure.progress.discarded;
+            // A request whose substituted head reached the upstream used
+            // its credentials, whatever ended the connection afterwards.
+            event.credentials = failure.progress.credentials;
             if event.bytes_in != 0 || event.bytes_out != 0 {
                 event.end = Some(failure.progress.end);
             }

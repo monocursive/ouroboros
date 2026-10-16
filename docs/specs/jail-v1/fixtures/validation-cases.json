@@ -3840,5 +3840,147 @@
         "value": []
       }
     ]
+  },
+  {
+    "name": "J13 proxy credentials named by id",
+    "schema": "jail-event",
+    "base": "examples/event-proxy-vault.json",
+    "valid": true,
+    "changes": []
+  },
+  {
+    "name": "J13 proxy credentials several ids",
+    "schema": "jail-event",
+    "base": "examples/event-proxy-vault.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "credentials"
+        ],
+        "value": [
+          "api",
+          "github"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "J13 proxy credentials empty list",
+    "schema": "jail-event",
+    "base": "examples/event-proxy-vault.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "credentials"
+        ],
+        "value": []
+      }
+    ]
+  },
+  {
+    "name": "J13 proxy credentials repeated id",
+    "schema": "jail-event",
+    "base": "examples/event-proxy-vault.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "credentials"
+        ],
+        "value": [
+          "api",
+          "api"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "J13 proxy credentials empty id",
+    "schema": "jail-event",
+    "base": "examples/event-proxy-vault.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "credentials"
+        ],
+        "value": [
+          ""
+        ]
+      }
+    ]
+  },
+  {
+    "name": "J13 proxy credentials not a list",
+    "schema": "jail-event",
+    "base": "examples/event-proxy-vault.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "credentials"
+        ],
+        "value": "api"
+      }
+    ]
+  },
+  {
+    "name": "J13 credential note marked",
+    "schema": "jail-event",
+    "base": "examples/event-note-credential.json",
+    "valid": true,
+    "changes": []
+  },
+  {
+    "name": "J13 credential note unmarked",
+    "schema": "jail-event",
+    "base": "examples/event-note-credential.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "uses_recorded"
+        ],
+        "delete": true
+      }
+    ]
+  },
+  {
+    "name": "J13 credential note mark false",
+    "schema": "jail-event",
+    "base": "examples/event-note-credential.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "uses_recorded"
+        ],
+        "value": false
+      }
+    ]
+  },
+  {
+    "name": "J13 credential note without its id",
+    "schema": "jail-event",
+    "base": "examples/event-note-credential.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "fields",
+          "credential_id"
+        ],
+        "delete": true
+      }
+    ]
   }
 ]

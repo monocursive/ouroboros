@@ -222,6 +222,9 @@ pub struct JailSection {
     /// Observation keys.
     #[serde(default)]
     pub observation: ObservationSection,
+    /// `jail.summary`: `false` turns the end-of-run summary off by default
+    /// (J13). Presentation only, never a policy input; `config.toml` only.
+    pub summary: Option<bool>,
 }
 
 /// `[jail_host.network]`: host configuration, forbidden in project files.
@@ -308,7 +311,7 @@ struct ForbiddenKey {
 /// project file can only narrow: `profile` and `extends` would choose the
 /// base authority, which §6.3 refuses as widening, and command rules are
 /// the operator's.
-const FORBIDDEN_KEYS: [ForbiddenKey; 4] = [
+const FORBIDDEN_KEYS: [ForbiddenKey; 5] = [
     ForbiddenKey {
         table: JailTable::OperatorConfig,
         key: "extends",
@@ -338,6 +341,13 @@ const FORBIDDEN_KEYS: [ForbiddenKey; 4] = [
         present: |jail| !jail.commands.is_empty(),
         code: ErrorCode::InvalidConfig,
         message: "command rules are operator-only",
+    },
+    ForbiddenKey {
+        table: JailTable::ProjectFile,
+        key: "summary",
+        present: |jail| jail.summary.is_some(),
+        code: ErrorCode::InvalidConfig,
+        message: "`summary` is an operator preference for config.toml, not a project setting",
     },
 ];
 
@@ -816,6 +826,12 @@ mod tests {
                 "jail.commands",
                 ErrorCode::InvalidConfig,
             ),
+            // J13: the summary is the operator's presentation preference.
+            (
+                "[jail]\nsummary = false\n",
+                "jail.summary",
+                ErrorCode::InvalidConfig,
+            ),
         ] {
             let error = parse_project_config(text).expect_err(key);
             assert_eq!((error.code, error.key_path.as_deref()), (code, Some(key)));
@@ -829,6 +845,11 @@ mod tests {
             "[jail]\nprofile = \"build\"\n[jail.commands]\ndeny = [\"git push --force\"]\n",
         )
         .expect("config.toml may select a profile and carry command rules");
+        let config = parse_operator_config("[jail]\nsummary = false\n")
+            .expect("config.toml may turn the end-of-run summary off");
+        assert_eq!(config.jail.and_then(|jail| jail.summary), Some(false));
+        let error = parse_operator_config("[jail]\nsummary = \"no\"\n").expect_err("a bool");
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
     }
 
     /// `config.toml` names no base profile to extend, and its `[jail]` table

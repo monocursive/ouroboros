@@ -2383,6 +2383,7 @@ fn n02_a_resource_failure_event_is_truthful() {
         discarded_bytes: 0,
         duration: Duration::from_millis(3),
         end: None,
+        credentials: Vec::new(),
     };
     let event = proxy::proxy_event(&result, ATTEMPT, 1, SystemTime::now(), 1);
     assert_eq!(event.decision, Some(Decision::Allow));
@@ -2392,6 +2393,9 @@ fn n02_a_resource_failure_event_is_truthful() {
     assert_eq!(outcome.completion, Completion::ProxyClose);
     assert_eq!(event.fields["reason"], "resource_exhausted");
     assert_eq!(event.fields["end"], serde_json::Value::Null);
+    // J13: a result that substituted no credential journals no
+    // `credentials` field, so a run without a vault writes what it did.
+    assert!(!event.fields.contains_key("credentials"));
     let value = serde_json::to_value(&event).expect("serializes");
     let errors: Vec<String> = common::validators()["jail-event"]
         .iter_errors(&value)

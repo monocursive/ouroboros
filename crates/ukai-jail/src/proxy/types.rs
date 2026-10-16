@@ -406,6 +406,11 @@ pub struct ProxyResult {
     pub duration: Duration,
     /// How a relayed request ended; `None` when nothing was relayed.
     pub end: Option<EndReason>,
+    /// J13: the ids (never values, placeholders or digests) of the vault
+    /// credentials whose placeholder the proxy replaced in a request head
+    /// it sent upstream whole on this connection, sorted and unique. Empty
+    /// when it replaced none, including every refused request.
+    pub credentials: Vec<String>,
 }
 
 /// Receives results. Called from connection threads; must not block for

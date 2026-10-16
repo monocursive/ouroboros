@@ -413,6 +413,13 @@ impl AgentNet {
                         .fields
                         .insert("kind".into(), Value::from("credential"));
                     event.fields.insert("credential_id".into(), Value::from(id));
+                    // J13: this build names, on every proxy result, the
+                    // credentials its upstream request carried; a reader
+                    // of a journal without this mark cannot tell a zero
+                    // from an unrecorded count.
+                    event
+                        .fields
+                        .insert("uses_recorded".into(), Value::from(true));
                     event
                         .fields
                         .insert("generation".into(), Value::from(generation));
@@ -1420,6 +1427,7 @@ mod tests {
             discarded_bytes: 0,
             duration: Duration::ZERO,
             end: None,
+            credentials: Vec::new(),
         }
     }
 

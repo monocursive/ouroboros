@@ -61,6 +61,8 @@ fn the_announced_schema_identifiers_match_the_checked_in_schema_files() {
         // own now (§8.2).
         ("gate", "jail-gate.schema.json"),
         ("control", "jail-control.schema.json"),
+        // J13: the end-of-run summary record.
+        ("summary", "jail-summary.schema.json"),
     ] {
         let schema = read_json(&specs_dir().join(file));
         let declared = schema["properties"]["schema"]["const"]

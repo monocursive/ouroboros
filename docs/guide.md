@@ -435,6 +435,15 @@ For a particular attempt, use `ukai-jail tail --attempt ID --json`, replacing
 `ID` with its receipt's `attempt_id`. This matters when several commands run
 at once: the default follows the most recently updated attempt.
 
+On a terminal, `run` ends with a short summary of what the evidence shows:
+the outcome and whether the process tree was verified dead, the workspace
+paths opened for writing, the hosts allowed and denied, each vault
+credential's uses, and the evidence coverage. A count prefixed `at least`
+comes from incomplete evidence, and `not observed` is never a zero. The same
+lines are available afterwards, for a CI log for example, with
+`ukai-jail tail --summary` (add `--json` for structured output). `--quiet`, or
+`summary = false` under `[jail]` in `config.toml`, turns the summary off.
+
 When reading the receipt, start with these fields:
 
 | Field | What to check |

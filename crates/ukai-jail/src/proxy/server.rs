@@ -526,5 +526,6 @@ pub(super) fn denial(
         discarded_bytes: 0,
         duration: accepted_at.elapsed(),
         end: None,
+        credentials: Vec::new(),
     }
 }
