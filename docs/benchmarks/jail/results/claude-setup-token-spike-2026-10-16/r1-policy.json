@@ -1,0 +1,218 @@
+{
+  "policy_digest": "sha256:bdeb3c57c55a6c2984a9b7725153ef5572d21f54a6a2502a76723d17f11a293b",
+  "provenance": [
+    {
+      "detail": null,
+      "key": "profile",
+      "origin": "builtin-profile:agent"
+    },
+    {
+      "detail": null,
+      "key": "launch.network.allow",
+      "origin": "launch-profile:claude-oauth"
+    },
+    {
+      "detail": "240s",
+      "key": "limits.wall",
+      "origin": "cli"
+    },
+    {
+      "detail": "operator file",
+      "key": "launch.resolution",
+      "origin": "launch-profile:claude-oauth"
+    },
+    {
+      "detail": null,
+      "key": "environment.bindings.CLAUDE_CONFIG_DIR",
+      "origin": "launch-profile:claude-oauth"
+    },
+    {
+      "detail": null,
+      "key": "environment.bindings.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "origin": "launch-profile:claude-oauth"
+    },
+    {
+      "detail": null,
+      "key": "environment.bindings.DISABLE_AUTOUPDATER",
+      "origin": "launch-profile:claude-oauth"
+    },
+    {
+      "detail": "vault",
+      "key": "launch.credentials.claude-oauth",
+      "origin": "launch-profile:claude-oauth"
+    },
+    {
+      "detail": "claude-oauth",
+      "key": "launch",
+      "origin": "launch-profile:claude-oauth"
+    }
+  ],
+  "schema": "ukai.jail.policy-file/1",
+  "snapshot": {
+    "environment": {
+      "bindings": [
+        {
+          "name": "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+          "value": "1"
+        },
+        {
+          "name": "CLAUDE_CONFIG_DIR",
+          "value": {
+            "path": "",
+            "root": "vendor_state"
+          }
+        },
+        {
+          "name": "DISABLE_AUTOUPDATER",
+          "value": "1"
+        },
+        {
+          "name": "LANG",
+          "value": "C.UTF-8"
+        },
+        {
+          "name": "PATH",
+          "value": "/usr/local/bin:/usr/bin:/bin"
+        },
+        {
+          "name": "TMPDIR",
+          "value": {
+            "path": "",
+            "root": "scratch"
+          }
+        }
+      ],
+      "inherit_host": false
+    },
+    "filesystem": {
+      "deny_read": [],
+      "protected_coverage": "existing_and_root",
+      "protected_segments": [
+        ".git/config",
+        ".git/hooks"
+      ],
+      "read_only": [
+        {
+          "path": "/bin",
+          "root": "host"
+        },
+        {
+          "path": "/etc/group",
+          "root": "host"
+        },
+        {
+          "path": "/etc/hosts",
+          "root": "host"
+        },
+        {
+          "path": "/etc/localtime",
+          "root": "host"
+        },
+        {
+          "path": "/etc/passwd",
+          "root": "host"
+        },
+        {
+          "path": "/etc/resolv.conf",
+          "root": "host"
+        },
+        {
+          "path": "/etc/ssl",
+          "root": "host"
+        },
+        {
+          "path": "/lib",
+          "root": "host"
+        },
+        {
+          "path": "/lib64",
+          "root": "host"
+        },
+        {
+          "path": "/usr",
+          "root": "host"
+        }
+      ],
+      "read_write": [
+        {
+          "path": "",
+          "root": "scratch"
+        },
+        {
+          "path": "",
+          "root": "vendor_state"
+        },
+        {
+          "path": "",
+          "root": "workspace"
+        }
+      ]
+    },
+    "launch": {
+      "credentials": [
+        {
+          "dest": ".vault-claude-oauth",
+          "id": "claude-oauth",
+          "mode": "vault",
+          "source": "/home/ubuntu/.config/ukai/credentials/claude-oauth",
+          "vault": {
+            "allow_plaintext": false,
+            "binaries": [
+              "/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+            ],
+            "header": {
+              "name": "authorization",
+              "prefix": "Bearer "
+            },
+            "hosts": [
+              "https://api.anthropic.com"
+            ]
+          }
+        }
+      ],
+      "home_is_state": false,
+      "state_subdirs": [],
+      "state_var": "CLAUDE_CONFIG_DIR"
+    },
+    "limits": {
+      "cpu": null,
+      "mem": null,
+      "pids": {
+        "required": false,
+        "value": "512"
+      },
+      "wall": {
+        "required": true,
+        "value": "240000"
+      }
+    },
+    "network": {
+      "allow": [
+        "api.anthropic.com:443"
+      ],
+      "mode": "proxy",
+      "ruleset": "ukai.jail.network/1",
+      "tls_only": [
+        "api.anthropic.com:443"
+      ],
+      "translation_prefixes": []
+    },
+    "observation": {
+      "evidence": "strict",
+      "mode": "on"
+    },
+    "platform": "linux",
+    "profile": "agent",
+    "profile_version": 1,
+    "roots": {
+      "scratch": {
+        "kind": "managed"
+      },
+      "vendor_state": {
+        "kind": "managed"
+      },
+      "workspace": "/home/ubuntu/spike-oauth/ws1"
+    },
+    "schema": "ukai.jail.policy-snapshot/1"
+  }
+}

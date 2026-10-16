@@ -1,0 +1,25 @@
+ukai-jail 0.1.0
+platform linux x86_64 (Linux 7.0.0-31-generic)
+closed set linux-closed-v1
+schema receipt ukai.jail.receipt/1
+schema event ukai.event/1
+schema policy ukai.jail.policy/1
+schema policy_snapshot ukai.jail.policy-snapshot/1
+schema policy_file ukai.jail.policy-file/1
+schema gate ukai.jail.gate/1
+schema control ukai.jail.control/1
+schema network ukai.jail.network/1
+schema learned_policy ukai.jail.learned-policy/1
+schema doctor ukai.jail.doctor/1
+schemas frozen (milestone 1)
+build rustc 1.98.1 (48a229cea 2026-09-01)
+build target x86_64-unknown-linux-gnu opt-level 3 debug-assertions false
+build revision unknown dirty unknown
+build inputs sha256:20fa57b7322c69a757340c06c23bb518b6486ed7de6988cf5b34ddf8d8b49651
+
+f1e40288bf6668e09c1d7d51d55c5f51005aacd929f2b55518a5cae6d14ff9fe  ~/spike-oauth/bin/ukai-jail
+4503bfe11a6c7fcc1e0b39b5e0d347c04248f750b03b0977b3ad6b531fe6f358  /usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+2.1.295 (Claude Code)
+Linux 7.0.0-31-generic x86_64
+Ubuntu 26.04.1 LTS
+bubblewrap 0.11.1

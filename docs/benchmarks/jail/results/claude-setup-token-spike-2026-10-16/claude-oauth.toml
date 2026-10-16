@@ -1,0 +1,20 @@
+# Spike 2026-10-16: Claude Code setup token through the vault.
+# Measures the vendor facts in docs/specs/jail-launch-and-summary.md section 6.3:
+# header for CLAUDE_CODE_OAUTH_TOKEN, placeholder acceptance, first-run hosts, HOME needs.
+name = "claude-oauth"
+jail = "agent"
+state_var = "CLAUDE_CONFIG_DIR"
+
+[environment]
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+DISABLE_AUTOUPDATER = "1"
+
+[credentials.claude-oauth]
+mode = "vault"
+source = "~/.config/ukai/credentials/claude-oauth"
+hosts = ["https://api.anthropic.com"]
+header = { name = "authorization", prefix = "Bearer " }
+binaries = ["/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"]
+
+[network]
+allow = ["api.anthropic.com"]

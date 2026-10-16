@@ -1,0 +1,29 @@
+# Console output of analyze.py (r1) and of the per-run summary loop (r2-r11),
+# copied verbatim from the operator session on 2026-10-16. Each line is derived
+# from that run's receipt (runs/rN/jail.json), its journal (trace.ndjson), the
+# workspace file greeting.txt and Claude Code's JSON output. Only r1's receipt,
+# policy and journal are kept in this directory.
+
+phase settled | outcome {"kind": "exited", "code": 0, "signal": null, "cause": null, "error": null}
+errors []
+tree_empty True | state_cleanup "complete"
+coverage {'exec': 'active', 'fs.write': 'active', 'fs.deny': 'active', 'net': 'active', 'limits': 'active', 'proxy.net': 'active'}
+credentials [{"never_staged": true, "id": "claude-oauth", "mode": "vault", "digest": null, "digest_unavailable_reason": "never_staged"}]
+greeting.txt 'hello\n'
+journal /home/ubuntu/spike-oauth/data/attempts/att_0d3cb04d-5def-4ede-9d3c-7cf0d58b51d5/trace.ndjson
+proxy results (destination, decision, reason, ok): count
+   ('api.anthropic.com:443', 'allow', 'relayed', True) 4
+credential notes [('claude-oauth', 'loaded')]
+fs.deny (op, path kind, path): count
+
+r2 exit=0 wall=7.250677472 settled exited 0 tree_empty True cov_all_active True greeting 'hello\n' claude(is_error,turns) (False, 2) fs.deny 0 {('api.anthropic.com:443', 'allow', 'relayed'): 4}
+r3 exit=0 wall=8.453651633 settled exited 0 tree_empty True cov_all_active True greeting 'hello\n' claude(is_error,turns) (False, 2) fs.deny 0 {('api.anthropic.com:443', 'allow', 'relayed'): 4}
+r4 exit=0 wall=14.678330186 settled exited 0 tree_empty True cov_all_active True greeting 'hello\n' claude(is_error,turns) (False, 2) fs.deny 0 {('api.anthropic.com:443', 'allow', 'relayed'): 4}
+r5 exit=0 wall=11.233360625 settled exited 0 tree_empty True cov_all_active True greeting 'hello\n' claude(is_error,turns) (False, 2) fs.deny 0 {('api.anthropic.com:443', 'allow', 'relayed'): 4}
+r6 exit=0 wall=6.929079950 settled exited 0 tree_empty True cov_all_active True greeting 'hello\n' claude(is_error,turns) (False, 2) fs.deny 0 {('api.anthropic.com:443', 'allow', 'relayed'): 4}
+r7 exit=0 wall=13.040078940 settled exited 0 tree_empty True cov_all_active True greeting 'hello\n' claude(is_error,turns) (False, 2) fs.deny 0 {('api.anthropic.com:443', 'allow', 'relayed'): 4}
+r8 exit=0 wall=8.248017705 settled exited 0 tree_empty True cov_all_active True greeting 'hello\n' claude(is_error,turns) (False, 2) fs.deny 0 {('api.anthropic.com:443', 'allow', 'relayed'): 4}
+r9 exit=0 wall=8.018196802 settled exited 0 tree_empty True cov_all_active True greeting 'hello\n' claude(is_error,turns) (False, 2) fs.deny 0 {('api.anthropic.com:443', 'allow', 'relayed'): 4}
+r10 exit=0 wall=15.088732415 settled exited 0 tree_empty True cov_all_active True greeting 'hello\n' claude(is_error,turns) (False, 2) fs.deny 0 {('api.anthropic.com:443', 'allow', 'relayed'): 4}
+r11 exit=0 wall=12.368059772 settled exited 0 tree_empty True cov_all_active True greeting 'hello\n' claude(is_error,turns) (False, 2) fs.deny 0 {('api.anthropic.com:443', 'allow', 'relayed'): 4}
+token absent from all workspaces, run outputs and attempt records

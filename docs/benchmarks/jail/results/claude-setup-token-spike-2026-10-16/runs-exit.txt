@@ -1,0 +1,11 @@
+r1 exit=0 wall=3.719586044
+r2 exit=0 wall=7.250677472
+r3 exit=0 wall=8.453651633
+r4 exit=0 wall=14.678330186
+r5 exit=0 wall=11.233360625
+r6 exit=0 wall=6.929079950
+r7 exit=0 wall=13.040078940
+r8 exit=0 wall=8.248017705
+r9 exit=0 wall=8.018196802
+r10 exit=0 wall=15.088732415
+r11 exit=0 wall=12.368059772
