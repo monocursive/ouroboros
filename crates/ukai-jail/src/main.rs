@@ -182,11 +182,43 @@ impl EchoOff {
         }
         let mut quiet = saved;
         quiet.c_lflag &= !(libc::ECHO | libc::ECHONL);
+        // Review I3: Ctrl-C (or a hang-up, or a TERM) ends the process
+        // without unwinding, so `Drop` would never put echo back; the
+        // handler does, then lets the signal take its default course.
+        let _ = ECHO_SAVED.set(saved);
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
+            // SAFETY: installing a handler that only calls the
+            // async-signal-safe tcsetattr, signal and raise.
+            unsafe {
+                libc::signal(
+                    signal,
+                    restore_echo_and_reraise as extern "C" fn(libc::c_int) as libc::sighandler_t,
+                )
+            };
+        }
         // SAFETY: descriptor 0 and a live termios value.
         if unsafe { libc::tcsetattr(0, libc::TCSAFLUSH, &raw const quiet) } != 0 {
             return EchoOff(None);
         }
         EchoOff(Some(saved))
+    }
+}
+
+/// The terminal settings [`EchoOff`] replaced, for its signal handler.
+static ECHO_SAVED: std::sync::OnceLock<libc::termios> = std::sync::OnceLock::new();
+
+/// Puts the terminal's settings back, then re-raises `signal` with its
+/// default disposition, so the process ends as the signal says.
+extern "C" fn restore_echo_and_reraise(signal: libc::c_int) {
+    if let Some(saved) = ECHO_SAVED.get() {
+        // SAFETY: tcsetattr, signal and raise are async-signal-safe; the
+        // termios value was set before the handler was installed.
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, saved) };
+    }
+    // SAFETY: as above.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
     }
 }
 
@@ -521,6 +553,8 @@ fn program_json(
                 "status": if root.granted { "granted" } else { "covered" },
                 "by": if root.granted { Some("program_resolution") } else { None },
                 "covered_by": root.covered_by,
+                // Review F6: a deny_read over it leaves the child nothing.
+                "denied_by": root.denied_by,
             }))
             .collect::<Vec<_>>(),
     })
@@ -552,6 +586,17 @@ fn program_text(
         .collect();
     let _ = writeln!(out, "program argv {}", argv.join(" "));
     for root in roots {
+        // Review F6: the grant or cover gives the child nothing under a
+        // deny_read, and the program cannot be read inside.
+        if let Some(by) = &root.denied_by {
+            let _ = writeln!(
+                out,
+                "program read_only {} denied_by={} (the program cannot be read inside)",
+                escape(&root.path),
+                records::escape_control(by)
+            );
+            continue;
+        }
         match (&root.covered_by, root.granted) {
             (_, true) => {
                 let _ = writeln!(
@@ -683,6 +728,14 @@ fn explain_text(report: &ExplainReport) -> String {
     }
     if let Some((program, roots)) = &report.program {
         program_text(&mut out, program, roots);
+    }
+    if let Some(outer) = &report.nested_in {
+        let _ = writeln!(
+            out,
+            "workspace nested_in {} (a nested repository: the outer one's ukai.toml does not \
+             apply; pass --workspace to choose it)",
+            records::escape_control(&outer.to_string_lossy())
+        );
     }
     for requirement in &report.resolved.requirements {
         let _ = writeln!(out, "requirement {requirement} unmeasured");
@@ -890,6 +943,14 @@ fn doctor_text(report: &DoctorReport) -> String {
         }
         if let Some(note) = &launch.worktree {
             let _ = writeln!(out, "workspace {note}");
+        }
+        if let Some(outer) = &launch.nested_in {
+            let _ = writeln!(
+                out,
+                "workspace nested_in {} (a nested repository: the outer one's ukai.toml does \
+                 not apply; pass --workspace to choose it)",
+                records::escape_control(&outer.to_string_lossy())
+            );
         }
     }
     let _ = writeln!(out, "ready {}", report.ready);
@@ -1345,6 +1406,7 @@ mod tests {
             resolved,
             platform: m1_platform(),
             program: None,
+            nested_in: None,
         }
     }
 
@@ -1386,6 +1448,7 @@ mod tests {
             resolved,
             platform: m1_platform(),
             program: None,
+            nested_in: None,
         });
         assert!(text.contains("read_only host:sec<U+202E>ret"), "{text}");
         assert!(!text.contains('\u{202e}'), "{text}");
@@ -1395,6 +1458,7 @@ mod tests {
             resolved: m1_resolved(),
             platform: m1_platform(),
             program: None,
+            nested_in: None,
         });
         assert!(clean.starts_with("policy tool\nprofile tool\n"), "{clean}");
         assert!(
@@ -1425,6 +1489,7 @@ mod tests {
             resolved,
             platform: m1_platform(),
             program: None,
+            nested_in: None,
         });
         let limits: Vec<&str> = text
             .lines()

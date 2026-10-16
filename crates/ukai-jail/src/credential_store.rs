@@ -406,6 +406,39 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
+    /// A synthetic `fstat` result: what a second local user's object looks
+    /// like, which a single-uid test cannot create.
+    fn synthetic(kind: Kind, uid: u32, mode: u32) -> anchored::Stat {
+        anchored::Stat {
+            dev: 1,
+            ino: 2,
+            kind,
+            mode,
+            uid,
+            gid: u32::MAX - 1,
+            nlink: 1,
+            size: 0,
+            mtime: (0, 0),
+            ctime: (0, 0),
+            mount_root: Some(false),
+        }
+    }
+
+    /// The owner rules, which need a second local user end to end: a
+    /// directory on the walk owned by someone else, and an existing entry
+    /// someone else owns, refuse.
+    #[test]
+    fn foreign_owners_refuse_on_the_walk_and_the_replaced_file() {
+        let me = crate::state::effective_uid();
+        let other = if me == 4242 { 4243 } else { 4242 };
+        let path = Path::new("/x");
+        assert!(check_walked(&synthetic(Kind::Directory, other, 0o755), path).is_err());
+        assert!(check_walked(&synthetic(Kind::Directory, me, 0o755), path).is_ok());
+        assert!(check_walked(&synthetic(Kind::Directory, 0, 0o755), path).is_ok());
+        assert!(check_replaceable(&synthetic(Kind::Regular, other, 0o600), path).is_err());
+        assert!(check_replaceable(&synthetic(Kind::Regular, me, 0o600), path).is_ok());
+    }
+
     fn config() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -509,6 +542,62 @@ mod tests {
         std::os::unix::fs::symlink(&other, config.join(DIRECTORY)).unwrap();
         assert!(set(&config, "api", b"v", false).is_err());
         assert!(!other.join("api").exists());
+    }
+
+    /// J12 adversarial review: a credential file with a second name refuses
+    /// `--force` and `rm` (the other name could lie anywhere). Kills:
+    /// `check_replaceable` without its link count.
+    #[test]
+    fn review_a_hard_linked_credential_is_neither_replaced_nor_removed() {
+        let (_dir, config) = config();
+        let path = set(&config, "api", b"first", false).unwrap();
+        let other = config.parent().unwrap().join("other-name");
+        std::fs::hard_link(&path, &other).unwrap();
+        assert!(
+            set(&config, "api", b"second", true)
+                .unwrap_err()
+                .contains("hard links")
+        );
+        assert!(remove(&config, "api").unwrap_err().contains("hard links"));
+        assert_eq!(std::fs::read(&other).unwrap(), b"first");
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+    }
+
+    /// J12 adversarial review. Kills: the credentials directory's own
+    /// owner and mode rule (a sticky world-writable directory passes the
+    /// walk's writable-by-others rule; only that rule refuses it).
+    #[test]
+    fn review_a_sticky_shared_credentials_directory_refuses() {
+        let (_dir, config) = config();
+        std::fs::create_dir_all(config.join(DIRECTORY)).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(
+            config.join(DIRECTORY),
+            std::fs::Permissions::from_mode(0o1777),
+        )
+        .unwrap();
+        assert!(set(&config, "api", b"v", false).is_err());
+        assert!(!config.join(DIRECTORY).join("api").exists());
+    }
+
+    /// J12 adversarial review. Kills: the walk's writable-by-others rule
+    /// above the credentials directory (masked for `credentials/` itself by
+    /// its own mode rule).
+    #[test]
+    fn review_a_world_writable_config_directory_refuses() {
+        let (_dir, config) = config();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(set(&config, "api", b"v", false).is_err());
+        assert!(!config.join(DIRECTORY).join("api").exists());
+    }
+
+    /// J12 adversarial review. Kills: `check_id` reduced to "no slash".
+    #[test]
+    fn review_ids_outside_the_grammar_refuse() {
+        for id in [".hidden", "a b", "-x", "x\ny", "", &"a".repeat(65)] {
+            assert!(check_id(id).is_err(), "{id:?}");
+        }
     }
 
     #[test]

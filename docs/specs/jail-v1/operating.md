@@ -496,7 +496,10 @@ With `--from-path` (which the alias implies):
   commands with your authority. Outside a repository it refuses
   (`invalid_config`, key `--workspace`); `--workspace` still chooses. In a
   linked worktree or a submodule the common git directory stays outside the
-  workspace, so git commands inside fail; `doctor` says so.
+  workspace, so git commands inside fail; `doctor` says so. From inside a
+  nested repository (a vendored one with its own `.git`) the workspace is the
+  nested one and the outer repository's `ukai.toml` does not apply;
+  `explain` and `doctor` print `workspace nested_in OUTER`.
 - **The program** is the launch name looked up on *your* `PATH` (read by the
   supervisor, never given to the child): the first absolute entry holding an
   executable regular file of that name; empty and relative entries are never
@@ -505,8 +508,14 @@ With `--from-path` (which the alias implies):
   not writable by others without the sticky bit; from the install root down,
   no directory writable by anyone but its owner (a group write counts only
   through your private group, so Ubuntu's default umask 002 is fine); the
-  file itself owned by root or you and neither group- nor other-writable. Its
-  argv is `[the real path, ARG...]`.
+  file itself owned by root or you, neither group- nor other-writable, and,
+  when you own it, with exactly one name (a second one, such as a package
+  manager's hard-linked store inside the repository, would let the agent
+  rewrite it in place). Every symbolic link the lookup follows must lie
+  outside every root the agent can write and in a directory only root or you
+  can change: a `PATH` entry inside the repository (direnv, `node_modules/.bin`,
+  a `.venv`) cannot choose the program through a link it ships. Its argv is
+  `[the real path, ARG...]`.
 - **The install root**, `program_root` levels above the real file (launch
   profile data, default 1: its own directory), is granted read-only and bound
   from the handle the walk took, so the child sees the directory the program
@@ -521,16 +530,22 @@ With `--from-path` (which the alias implies):
   rewrite its own executable would run that code with your authority on your
   next launch); or overlaps `/proc` or `/sys`.
 - **What it needs to run**: an ELF file needs its loader in the runtime roots;
-  a `#!` interpreter in the runtime roots needs nothing more. `#!/usr/bin/env
-  X` becomes `[X', PROGRAM, ARG...]`, `X` resolved the same way on your `PATH`
-  and its directory granted read-only too, because inside the jail `env` would
-  search the fixed contained `PATH`. Other forms refuse naming the
-  interpreter: options to `env`, several interpreter arguments, a nested
-  script, an interpreter outside the runtime roots
+  a `#!` interpreter in the runtime roots needs nothing more, and neither does
+  `#!/usr/bin/env X` when `X` resolves inside them. When `X` resolves outside
+  them, `#!/usr/bin/env X` becomes `[X', PROGRAM, ARG...]`, `X` resolved the
+  same way on your `PATH` and its directory granted read-only too, because
+  inside the jail `env` would search the fixed contained `PATH`. Other forms
+  refuse naming the interpreter: options to `env`, several interpreter
+  arguments, a nested script, an interpreter outside the runtime roots
   (`exec_interpreter_missing` for a missing loader or interpreter).
 - **Before release** the program is walked to again under the install root's
-  own handle and by its path; a file swapped since resolution refuses
-  (`policy_widening`, "identity mismatch") and nothing runs.
+  own handle and by its path; a file swapped, written, or given another name
+  since resolution refuses (`policy_widening`, "identity mismatch") and
+  nothing runs. What remains is the interval between that check and the
+  launcher's `execve`: a process running as you that renames another file
+  into the install root then wins, and the child runs that file, still
+  contained and without a `@program` credential (the vault pins the file's
+  identity, size and times).
 - **Disclosure**: `explain --from-path` prints the program, its argv and every
   derived root (`--json` adds a `program` object), the provenance names
   `program-resolution`, and when stderr is a terminal one line precedes exec:
@@ -539,7 +554,9 @@ With `--from-path` (which the alias implies):
   ukai-jail: claude = /home/u/.local/share/claude/versions/2.1.295 (read-only: /home/u/.local/share/claude/versions)
   ```
 
-  With stderr a pipe or a file, nothing is added.
+  With stderr a pipe or a file, nothing is added. A root a `deny_read` covers
+  (a project file may deny-read it) is shown as denied: the program cannot
+  be read inside.
 
 A project `ukai.toml` can still deny-read the install root (the agent then
 fails visibly) or shrink the allowed hosts; it cannot add a grant, a host or

@@ -133,6 +133,9 @@ pub struct ExplainReport {
     /// J12: the program `--from-path` resolved, and what became of each of
     /// its install roots.
     pub program: Option<(crate::program::Program, Vec<from_path::DerivedRoot>)>,
+    /// J12 review F7: the repository a discovered workspace is nested in,
+    /// whose `ukai.toml` does not apply.
+    pub nested_in: Option<PathBuf>,
 }
 
 /// What `doctor` measured.
@@ -183,6 +186,9 @@ pub struct LaunchReadiness {
     /// J12 §3.2: the workspace's `.git` is a file (a linked worktree or a
     /// submodule), whose common git directory the agent cannot see.
     pub worktree: Option<String>,
+    /// J12 review F7: the repository a discovered workspace is nested in,
+    /// whose `ukai.toml` does not apply.
+    pub nested_in: Option<PathBuf>,
 }
 
 /// Every launch profile is `experimental` until a real run of that agent is
@@ -1460,12 +1466,20 @@ fn read_project_file(path: &Path) -> Result<Option<String>, JailError> {
 // explain and doctor
 // ---------------------------------------------------------------------------
 
+/// Whether `--from-path` discovered the workspace (no `--workspace`).
+fn discovered(selection: &crate::cli::Selection) -> bool {
+    selection.from_path && selection.workspace.is_none()
+}
+
 /// Resolves and renders the requested policy without probing or executing.
 ///
 /// # Errors
 /// Returns the resolution errors of [`resolve_plan`].
 pub fn explain(ctx: &Context, args: &ExplainArgs) -> Result<ExplainReport, JailError> {
     let plan = resolve_plan(ctx, &args.policy)?;
+    let nested_in = discovered(&args.policy.selection)
+        .then(|| from_path::outer_repository(&plan.workspace))
+        .flatten();
     let program = plan.program.map(|program| {
         let roots = from_path::derived_roots(&program, &plan.resolved);
         (program, roots)
@@ -1474,6 +1488,7 @@ pub fn explain(ctx: &Context, args: &ExplainArgs) -> Result<ExplainReport, JailE
         resolved: plan.resolved,
         platform: platform_record(ctx),
         program,
+        nested_in,
     })
 }
 
@@ -1512,6 +1527,9 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
                 hints,
                 one_of,
                 shadowed_by_verb: crate::cli::VERBS.contains(&name.as_str()),
+                nested_in: discovered(&args.selection)
+                    .then(|| from_path::outer_repository(&plan.workspace))
+                    .flatten(),
                 worktree: plan
                     .workspace
                     .join(".git")

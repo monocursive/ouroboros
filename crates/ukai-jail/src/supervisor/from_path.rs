@@ -126,6 +126,15 @@ fn nearest_top<'a, F: Fn() -> bool>(
     None
 }
 
+/// Review F7: the repository a discovered workspace is nested in, if any:
+/// discovery stops at the nearest top level, so from inside a vendored
+/// repository the outer repository's `ukai.toml` does not apply. `doctor`
+/// and `explain` say so.
+#[must_use]
+pub fn outer_repository(workspace: &Path) -> Option<PathBuf> {
+    discover_workspace(workspace.parent()?).ok()
+}
+
 /// Whether `dir` holds a `.git` that marks a repository's top level.
 fn is_repository_top(dir: &Dir) -> bool {
     let Ok(git) = Name::new(b".git") else {
@@ -187,7 +196,7 @@ pub(super) fn home_or_above(path: &Path, homes: &[PathBuf]) -> Option<String> {
     if path == Path::new("/") {
         return Some("the filesystem root".to_owned());
     }
-    homes.iter().find_map(|home| {
+    let by_name = homes.iter().find_map(|home| {
         if home == path {
             Some(format!("the operator's home {}", home.display()))
         } else if home.starts_with(path) {
@@ -198,7 +207,35 @@ pub(super) fn home_or_above(path: &Path, homes: &[PathBuf]) -> Option<String> {
         } else {
             None
         }
-    })
+    });
+    by_name.or_else(|| home_or_above_by_identity(path, homes))
+}
+
+/// Review F4: [`home_or_above`] by `(dev, ino)`, so a bind mount or another
+/// spelling of the home, of `/` or of a directory above the home is the
+/// directory it is.
+fn home_or_above_by_identity(path: &Path, homes: &[PathBuf]) -> Option<String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let identity = |path: &Path| std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()));
+    let target = identity(path)?;
+    for home in homes {
+        let mut ancestor = Some(home.as_path());
+        while let Some(directory) = ancestor {
+            if identity(directory) == Some(target) {
+                return Some(if directory == home.as_path() {
+                    format!("the operator's home {}, by another path", home.display())
+                } else {
+                    format!(
+                        "{} (an ancestor of the operator's home {}), by another path",
+                        directory.display(),
+                        home.display()
+                    )
+                });
+            }
+            ancestor = directory.parent();
+        }
+    }
+    None
 }
 
 /// §3.2 step 3: on every contained run, a workspace that is `/`, the
@@ -269,6 +306,10 @@ pub struct DerivedRoot {
     pub granted: bool,
     /// The root that already makes it readable, when it is not granted.
     pub covered_by: Option<String>,
+    /// Review F6: a `deny_read` (a project file's, say) that covers it, so
+    /// the grant or cover gives the child nothing and the program cannot be
+    /// read inside.
+    pub denied_by: Option<String>,
 }
 
 /// What the resolution made of each install root: granted, or covered by a
@@ -303,10 +344,22 @@ pub fn derived_roots(program: &Program, resolved: &Resolved) -> Vec<DerivedRoot>
                         .map(|reference| reference.path.to_display())
                 })
                 .flatten();
+            let denied_by = resolved
+                .snapshot
+                .filesystem
+                .deny_read
+                .iter()
+                .filter(|reference| reference.root == RootToken::Host)
+                .find(|reference| {
+                    Path::new(OsStr::from_bytes(value))
+                        .starts_with(OsStr::from_bytes(reference.path.as_bytes()))
+                })
+                .map(|reference| reference.path.to_display());
             DerivedRoot {
                 path: root.path.clone(),
                 granted,
                 covered_by,
+                denied_by,
             }
         })
         .collect()
@@ -325,13 +378,20 @@ pub fn program_line(program: &Program, resolved: &Resolved) -> String {
         .iter()
         .map(|root| {
             let path = crate::records::escape_control(&root.path.display().to_string());
-            match (&root.covered_by, root.granted) {
+            let shown = match (&root.covered_by, root.granted) {
                 (_, true) => format!("read-only: {path}"),
                 (Some(by), false) => format!(
                     "already readable: {path} under {}",
                     crate::records::escape_control(by)
                 ),
                 (None, false) => format!("not granted: {path}"),
+            };
+            match &root.denied_by {
+                Some(by) => format!(
+                    "{shown}, but denied by deny_read {}: the program cannot be read inside",
+                    crate::records::escape_control(by)
+                ),
+                None => shown,
             }
         })
         .collect();
@@ -425,6 +485,40 @@ pub(super) fn check_program_placement(
             .into_iter()
             .map(|executable| executable.path.as_path()),
     );
+    // Review F1: a lookup a child-writable root steered. A symbolic link the
+    // repository ships in a `PATH` entry inside the workspace (direnv,
+    // `node_modules/.bin`, a `.venv`) would otherwise choose the program, and
+    // `@program` would bind the credential to whatever trusted file it names.
+    for executable in program.executables() {
+        for link in &executable.found_through {
+            let refuse_link = |why: String| {
+                widening(
+                    crate::program::KEY,
+                    format!(
+                        "`{}` was found on PATH through the symbolic link {}, which {why}; the \
+                         program it names would be chosen by whoever can write there",
+                        program.name,
+                        link.display()
+                    ),
+                )
+            };
+            if let Some(grant) = writable.iter().find(|grant| link.starts_with(grant)) {
+                return Err(refuse_link(format!(
+                    "lies inside the child-writable root {}",
+                    grant.display()
+                )));
+            }
+            if let Some(alias) = super::alias_conflict(&writable, link, crate::program::KEY)? {
+                return Err(refuse_link(format!(
+                    "is reached from a child-writable root through the bind alias {}",
+                    alias.display()
+                )));
+            }
+            if let Some(why) = link.parent().and_then(untrusted_directory) {
+                return Err(refuse_link(why));
+            }
+        }
+    }
     for root in checked {
         if let Some(what) = home_or_above(root, &placement.homes) {
             return Err(refuse(root, format!("is {what}")));
@@ -464,6 +558,32 @@ pub(super) fn check_program_placement(
         }
     }
     Ok(())
+}
+
+/// Why a directory holding a link the `PATH` lookup followed cannot be
+/// trusted to keep naming what it named: owned by someone other than root
+/// or this operator, or writable by others without the sticky bit (the walk
+/// rule of the pin). `None` when it can.
+fn untrusted_directory(directory: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = match std::fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) => return Some(format!("lies in {} ({error})", directory.display())),
+    };
+    let (uid, mode, gid) = (metadata.uid(), metadata.mode() & 0o7777, metadata.gid());
+    if uid != 0 && uid != crate::state::effective_uid() {
+        return Some(format!(
+            "lies in {}, owned by uid {uid}, neither root nor this operator",
+            directory.display()
+        ));
+    }
+    if crate::state::writable_by_others(mode, uid, gid) && mode & 0o1000 == 0 {
+        return Some(format!(
+            "lies in {}, mode {mode:04o}: writable by others without the sticky bit",
+            directory.display()
+        ));
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -701,6 +821,25 @@ mod tests {
         let found = nearest_top(checks.into_iter());
         assert_eq!(found, None);
         assert!(!asked.get());
+    }
+
+    /// Review F4: another path to the home or an ancestor (a bind mount; a
+    /// symlink stands in for one here) is the same directory by identity.
+    #[test]
+    fn home_or_above_matches_the_directory_not_only_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let home = root.join("home/u");
+        std::fs::create_dir_all(home.join("repo")).unwrap();
+        std::os::unix::fs::symlink(&home, root.join("alias-of-home")).unwrap();
+        std::os::unix::fs::symlink(root.join("home"), root.join("alias-of-parent")).unwrap();
+        let homes = [home.clone()];
+        let why = home_or_above(&root.join("alias-of-home"), &homes).expect("the home");
+        assert!(why.contains("by another path"), "{why}");
+        let why = home_or_above(&root.join("alias-of-parent"), &homes).expect("an ancestor");
+        assert!(why.contains("ancestor"), "{why}");
+        assert!(home_or_above(&home.join("repo"), &homes).is_none());
+        assert!(home_or_above(&root.join("alias-of-home/repo"), &homes).is_none());
     }
 
     #[test]

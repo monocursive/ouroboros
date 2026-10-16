@@ -938,7 +938,11 @@ fn k38_an_env_interpreter_outside_the_runtime_roots_is_made_explicit() {
     )
     .unwrap();
     write(&runtime.join("j12node"), &static_elf(), 0o755);
-    write(&fixture.bin.join("agent"), b"#!/usr/bin/env j12node\n", 0o755);
+    write(
+        &fixture.bin.join("agent"),
+        b"#!/usr/bin/env j12node\n",
+        0o755,
+    );
     let mut path = fixture.path_value();
     path.push(b':');
     path.extend_from_slice(runtime.as_os_str().as_bytes());
@@ -1013,7 +1017,11 @@ fn k38_an_env_interpreter_outside_the_runtime_roots_is_made_explicit() {
         assert!(error.message.contains(fragment), "{}", error.message);
     }
     // A nested script behind `env` refuses naming it.
-    write(&fixture.bin.join("agent"), b"#!/usr/bin/env j12node\n", 0o755);
+    write(
+        &fixture.bin.join("agent"),
+        b"#!/usr/bin/env j12node\n",
+        0o755,
+    );
     write(&runtime.join("j12node"), b"#!/bin/sh\n", 0o755);
     let error = refused(
         supervisor::resolve_plan(
@@ -1328,7 +1336,11 @@ fn k43_doctor_reports_the_binding_hints_and_the_headless_claim() {
     mkdir(&runtime, 0o755);
     write(&runtime.join("j12node"), &static_elf(), 0o755);
     write(&fixture.bin.join("j12node"), &static_elf(), 0o755);
-    write(&fixture.bin.join("agent"), b"#!/usr/bin/env j12node\n", 0o755);
+    write(
+        &fixture.bin.join("agent"),
+        b"#!/usr/bin/env j12node\n",
+        0o755,
+    );
     let output = fixture.binary(
         &fixture.repo,
         &["doctor", "--launch", "agent", "--from-path"],
@@ -1481,4 +1493,1025 @@ fn k44_a_stored_credential_is_the_one_the_alias_stages() {
     let report = fixture.run(platform, &fixture.repo, &["agent", "-p", "x"]);
     assert!(report.error.is_none(), "{:?}", report.error);
     assert_eq!(*seen.lock().unwrap(), ["second"]);
+}
+
+// ---------------------------------------------------------------------------
+// J12 adversarial review, 2026-10-16: killer tests
+//
+// `review_bug_*` fail on 4e40f8491: each pins a finding of the review
+// (j12-adversarial-review.md). Every other `review_*` passes on 4e40f8491
+// and kills a mutant of a refusal gate that the K-rows let survive.
+// ---------------------------------------------------------------------------
+
+/// The fixture's context with `path` as the operator's PATH.
+fn context_with_path(
+    fixture: &Fixture,
+    platform: Box<dyn Platform>,
+    cwd: &Path,
+    path: Vec<u8>,
+) -> supervisor::Context {
+    let mut ctx = fixture.context(platform, cwd);
+    ctx.env_lookup = Box::new(move |name| (name == "PATH").then(|| path.clone()));
+    ctx
+}
+
+fn from_path_plan(ctx: &supervisor::Context) -> Result<supervisor::Plan, JailError> {
+    supervisor::resolve_plan(
+        ctx,
+        &Fixture::policy("explain", &["--launch", "agent", "--from-path"]),
+    )
+}
+
+/// The `binaries` of the first credential the plan stages.
+fn bound_binaries(plan: &supervisor::Plan) -> Vec<String> {
+    plan.resolved.snapshot.launch.as_ref().unwrap().credentials[0]
+        .vault
+        .as_ref()
+        .unwrap()
+        .binaries
+        .clone()
+}
+
+fn join_path(dirs: &[&Path]) -> Vec<u8> {
+    dirs.iter()
+        .map(|dir| dir.as_os_str().as_bytes().to_vec())
+        .collect::<Vec<_>>()
+        .join(&b':')
+}
+
+/// Review F1 (fails on 4e40f8491): an absolute PATH entry inside the
+/// workspace (direnv's `PATH_add`, an activated in-repository virtualenv, a
+/// `node_modules/.bin`) lets the repository choose the program. A regular
+/// file there refuses (its install root overlaps the workspace), but a
+/// symlink the repository ships is canonicalized to whatever trusted file it
+/// names, which is then run as the launch name and bound to `@program`. The
+/// reason §3.3 step 1 gives for skipping relative entries ("the invocation
+/// directory, which a hostile repository controls, [would] pick the
+/// program") holds for this entry too.
+#[test]
+fn review_bug_a_path_entry_inside_the_workspace_never_chooses_the_program() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    // Another operator tool, outside every root, trustworthy on its own.
+    let other = fixture.root.join("tools/other");
+    mkdir(&other, 0o755);
+    write(&other.join("tool"), &static_elf(), 0o755);
+    // The repository ships `.bin/agent -> <that tool>`.
+    let planted = fixture.repo.join(".bin");
+    mkdir(&planted, 0o755);
+    std::os::unix::fs::symlink(other.join("tool"), planted.join("agent")).unwrap();
+    let ctx = context_with_path(
+        &fixture,
+        Box::new(platform()),
+        &fixture.repo,
+        join_path(&[&planted, &fixture.bin]),
+    );
+    match from_path_plan(&ctx) {
+        Err(error) => assert_eq!(error.key_path.as_deref(), Some("--from-path"), "{error}"),
+        Ok(plan) => panic!(
+            "the repository chose the program: `agent` = {}, credential bound to {:?}",
+            plan.program.as_ref().unwrap().program.path.display(),
+            bound_binaries(&plan)
+        ),
+    }
+}
+
+/// Review F2 (fails on 4e40f8491): `@program` refuses a `#!` script whose
+/// interpreter is a system one (its connections come from the interpreter,
+/// which "would admit every script it runs"), but `#!/usr/bin/env X` with X
+/// resolving inside the runtime roots is expanded and binds the credential
+/// to that very system interpreter (`/bin/sh`, `/usr/bin/python3`,
+/// `/usr/bin/node`), so any `sh -c`/`python3 -c` the agent's shell tool runs
+/// presents it. §3.3 step 5 defines the expansion only for X outside the
+/// runtime roots; inside them the script is a `#!` script with a system
+/// interpreter and `@program` must refuse as it does for `#!/bin/sh`.
+#[test]
+fn review_bug_env_with_a_system_interpreter_cannot_carry_program() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    write(&fixture.bin.join("agent"), b"#!/usr/bin/env sh\n", 0o755);
+    let ctx = fixture.context(Box::new(platform()), &fixture.repo);
+    match from_path_plan(&ctx) {
+        Err(error) => {
+            assert_eq!(error.code, ErrorCode::InvalidConfig, "{error}");
+            assert_eq!(
+                error.key_path.as_deref(),
+                Some("launch.credentials.first.binaries"),
+                "{error}"
+            );
+        }
+        Ok(plan) => panic!(
+            "`@program` bound the credential to the system interpreter {:?}",
+            bound_binaries(&plan)
+        ),
+    }
+}
+
+/// A relative PATH entry is never searched by the real binary, whose
+/// process directory is the invocation directory (the in-process K36 plan
+/// runs from the crate directory, so it never meets the planted file).
+/// Kills: `find_on_path` searching relative entries.
+#[test]
+fn review_a_relative_path_entry_never_resolves_in_the_invocation_directory() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    // `path_value` holds `relative/bin` before `tools/bin`.
+    mkdir(&fixture.repo.join("relative/bin"), 0o755);
+    write(
+        &fixture.repo.join("relative/bin/agent"),
+        &static_elf(),
+        0o755,
+    );
+    let output = fixture.binary(
+        &fixture.repo,
+        &["explain", "--launch", "agent", "--from-path"],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let expected = format!("program agent = {}/agent format=elf", fixture.bin.display());
+    assert!(
+        text(&output.stdout).lines().any(|line| line == expected),
+        "{}",
+        text(&output.stdout)
+    );
+}
+
+/// A directory, or a FIFO, named like the program is passed over as a shell
+/// passes it over, so the real program further down PATH is found.
+/// Kills: `find_on_path` accepting a non-regular candidate.
+#[test]
+fn review_a_directory_named_like_the_program_is_passed_over() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let first = fixture.root.join("tools/first");
+    mkdir(&first.join("agent"), 0o755);
+    let ctx = context_with_path(
+        &fixture,
+        Box::new(platform()),
+        &fixture.repo,
+        join_path(&[&first, &fixture.bin]),
+    );
+    let plan = from_path_plan(&ctx).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        plan.program.as_ref().unwrap().program.path,
+        fixture.bin.join("agent")
+    );
+}
+
+/// A world-writable directory without the sticky bit above the install root
+/// refuses at the pin, naming it: another user could rename the root away.
+/// Kills: `check_directory` without its writable-by-others rule.
+#[test]
+fn review_a_world_writable_ancestor_of_the_install_root_refuses() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let tools = fixture.root.join("tools");
+    std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let error = refused(
+        fixture.plan(&fixture.repo, &["--launch", "agent", "--from-path"]),
+        "world-writable ancestor",
+    );
+    assert_eq!(error.code, ErrorCode::PolicyWidening, "{error}");
+    assert_eq!(error.key_path.as_deref(), Some("--from-path"));
+    assert!(
+        error.message.contains(&tools.display().to_string()),
+        "{error}"
+    );
+    std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The user database's home refuses as a workspace whatever HOME says
+/// (here HOME is the fixture's). Kills: `operator_homes` without the
+/// database entry. Inspection only: nothing is written to that home.
+#[test]
+fn review_the_database_home_refuses_whatever_home_says() {
+    // SAFETY: getpwuid returns null or a pointer to static storage that
+    // stays valid until the next call on this thread.
+    let home = unsafe {
+        let entry = libc::getpwuid(libc::geteuid());
+        if entry.is_null() || (*entry).pw_dir.is_null() {
+            return;
+        }
+        PathBuf::from(OsString::from(std::ffi::OsStr::from_bytes(
+            std::ffi::CStr::from_ptr((*entry).pw_dir).to_bytes(),
+        )))
+    };
+    let Ok(home) = home.canonicalize() else {
+        return;
+    };
+    let fixture = Fixture::new();
+    // A fixture beneath that home would meet other refusals first.
+    if !home.is_dir() || fixture.root.starts_with(&home) {
+        return;
+    }
+    fixture.credential("first", b"token-value");
+    let error = refused(
+        fixture.plan(
+            &fixture.repo,
+            &[
+                "--launch",
+                "agent",
+                "--from-path",
+                "--workspace",
+                home.to_str().unwrap(),
+            ],
+        ),
+        "the database home",
+    );
+    assert_eq!(error.code, ErrorCode::PolicyWidening, "{error}");
+    assert_eq!(error.key_path.as_deref(), Some("--workspace"), "{error}");
+}
+
+/// A `.git` file longer than 4 KiB is not a gitfile, whatever it begins
+/// with. Kills: `is_repository_top` without its size bound.
+#[test]
+fn review_an_oversized_gitfile_is_not_a_top_level() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let mut big = b"gitdir: /elsewhere/.git/worktrees/deep\n".to_vec();
+    big.resize(4097, b'#');
+    write(&fixture.repo.join("src/deep/.git"), &big, 0o644);
+    let plan = fixture
+        .plan(
+            &fixture.repo.join("src/deep"),
+            &["--launch", "agent", "--from-path"],
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(plan.workspace, fixture.repo);
+}
+
+/// X05: with stderr a pipe, `ukai-jail NAME` adds no pre-exec line.
+/// Kills: the pre-exec line without its terminal gate.
+#[test]
+fn review_no_pre_exec_line_when_stderr_is_not_a_terminal() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let output = fixture.binary(&fixture.repo, &["agent", "-p", "x"], None);
+    let stderr = text(&output.stderr);
+    assert!(!stderr.contains("ukai-jail: agent ="), "{stderr}");
+}
+
+/// K39 on a terminal: the pre-exec line names the program and its root, and
+/// `--quiet` suppresses it. Runs the binary under `script(1)`, which gives
+/// it a pseudo-terminal. Kills: the pre-exec line without its quiet gate.
+#[test]
+fn review_the_pre_exec_line_on_a_terminal_and_quiet() {
+    let script = Path::new("/usr/bin/script");
+    if !script.exists() {
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let under_pty = |extra: &[&str]| -> String {
+        let mut words: Vec<String> = vec![
+            env!("CARGO_BIN_EXE_ukai-jail").to_owned(),
+            "run".into(),
+            "--launch".into(),
+            "agent".into(),
+            "--from-path".into(),
+        ];
+        words.extend(extra.iter().map(|word| (*word).to_owned()));
+        words.extend(["--".into(), "-p".into(), "x".into()]);
+        let mut command = Command::new(script);
+        if cfg!(target_os = "macos") {
+            command.arg("-q").arg("/dev/null").args(&words);
+        } else {
+            let quoted: Vec<String> = words
+                .iter()
+                .map(|word| format!("'{}'", word.replace('\'', "'\\''")))
+                .collect();
+            command
+                .args(["-q", "-e", "-c"])
+                .arg(quoted.join(" "))
+                .arg("/dev/null");
+        }
+        let output = command
+            .env_clear()
+            .env(
+                "PATH",
+                OsString::from(std::ffi::OsStr::from_bytes(&fixture.path_value())),
+            )
+            .env("HOME", &fixture.home)
+            .env("UKAI_DATA_DIR", &fixture.data)
+            .env("UKAI_CONFIG_DIR", &fixture.config)
+            .current_dir(&fixture.repo)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("script runs");
+        text(&output.stdout)
+    };
+    let line = format!(
+        "ukai-jail: agent = {bin}/agent (read-only: {bin})",
+        bin = fixture.bin.display()
+    );
+    let shown = under_pty(&[]);
+    assert!(shown.contains(&line), "{line:?} in {shown:?}");
+    let quiet = under_pty(&["--quiet"]);
+    assert!(!quiet.contains("ukai-jail: agent ="), "{quiet:?}");
+}
+
+/// A platform that runs `swap` the first time it is asked to probe: after
+/// resolution, before credentials are staged.
+struct SwapOnProbe {
+    inner: ScriptedPlatform,
+    swap: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl Platform for SwapOnProbe {
+    fn identity(&self) -> ukai_jail::platform::PlatformIdentity {
+        self.inner.identity()
+    }
+    fn owner_identity(&self) -> Option<ukai_jail::platform::OwnerIdentity> {
+        self.inner.owner_identity()
+    }
+    fn probe(
+        &self,
+        plan: &ukai_jail::platform::PlanRequest,
+    ) -> Vec<ukai_jail::capability::Capability> {
+        if let Some(swap) = self.swap.lock().unwrap().take() {
+            swap();
+        }
+        self.inner.probe(plan)
+    }
+    fn prepare(
+        &self,
+        plan: ukai_jail::platform::PreparedPlan,
+        sinks: ukai_jail::platform::Sinks,
+    ) -> Result<Box<dyn ukai_jail::platform::PreparedExecution>, JailError> {
+        self.inner.prepare(plan, sinks)
+    }
+}
+
+/// §3.3 step 7: a swap between resolution and staging refuses at staging,
+/// so a credential is never pinned to the replacement. Kills:
+/// `check_program_binding` (or its call) removed, which leaves only the
+/// gate's recheck to notice.
+#[test]
+fn review_a_swap_before_staging_refuses_at_staging() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let bin = fixture.bin.clone();
+    let tools = fixture.root.join("tools");
+    let platform = SwapOnProbe {
+        inner: platform(),
+        swap: Mutex::new(Some(Box::new(move || {
+            std::fs::rename(bin.join("agent"), tools.join("agent.old")).unwrap();
+            write(&bin.join("agent"), &static_elf(), 0o755);
+        }))),
+    };
+    let ctx = fixture.context(Box::new(platform), &fixture.repo);
+    let argv: Vec<OsString> = ["ukai-jail", "agent", "-p", "x"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    let cli::Command::Run(args) = Cli::try_parse_from(cli::alias_argv(&argv).unwrap())
+        .unwrap()
+        .command
+    else {
+        unreachable!()
+    };
+    let report = supervisor::run(&ctx, &args);
+    let error = report.error.as_ref().expect("a refusal");
+    assert_eq!(error.code, ErrorCode::PolicyWidening, "{error}");
+    assert_eq!(error.key_path.as_deref(), Some("--from-path"));
+    assert!(error.message.contains("staging"), "{error}");
+}
+
+/// Every clap subcommand is a built-in verb the alias never takes as a
+/// launch name. Kills: a verb dropped from `VERBS`.
+#[test]
+fn review_every_subcommand_is_a_verb() {
+    use clap::CommandFactory as _;
+    for command in Cli::command().get_subcommands() {
+        let name = command.get_name();
+        assert!(cli::VERBS.contains(&name), "`{name}` is missing from VERBS");
+        let argv: Vec<OsString> = ["ukai-jail", name].iter().map(OsString::from).collect();
+        assert_eq!(cli::alias_argv(&argv), None, "{name}");
+    }
+    assert!(cli::VERBS.contains(&"help"));
+}
+
+/// Review F3 (fails on 4e40f8491): "the binary is outside every writable
+/// grant" is checked by path only. A program file with a second name inside
+/// the workspace (a package manager's hard-linked store: bun's and pnpm's
+/// default on Linux, when the repository depends on the same package
+/// version) passes every placement refusal and the recheck, and a write
+/// through the workspace name rewrites, in place, the file the operator's
+/// next unjailed launch runs. Credential sources already refuse a second
+/// link (`source_multiply_linked`).
+#[test]
+fn review_bug_a_program_with_a_second_name_in_the_workspace_refuses() {
+    use std::io::Write as _;
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let store = fixture.repo.join("node_modules/.store");
+    mkdir(&store, 0o755);
+    std::fs::hard_link(fixture.bin.join("agent"), store.join("agent")).unwrap();
+    match fixture.plan(&fixture.repo, &["--launch", "agent", "--from-path"]) {
+        Err(error) => assert_eq!(error.key_path.as_deref(), Some("--from-path"), "{error}"),
+        Ok(plan) => {
+            // What a contained writer of the workspace can then do: rewrite
+            // the program in place through the workspace name. The identity
+            // is unchanged, so the recheck still passes.
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(store.join("agent"))
+                .unwrap();
+            file.write_all(b"\x7fELF-rewritten-by-the-workspace")
+                .unwrap();
+            drop(file);
+            let program = plan.program.as_ref().unwrap();
+            let recheck = program.recheck();
+            let now = std::fs::read(fixture.bin.join("agent")).unwrap();
+            panic!(
+                "accepted {} with a second name in the workspace; after a write through \
+                 that name the recheck says {:?} and the program begins {:?}",
+                program.program.path.display(),
+                recheck.map_err(|error| error.message),
+                String::from_utf8_lossy(&now[..20])
+            );
+        }
+    }
+}
+
+/// The install root at the operator's home refuses on its own rule, with
+/// the workspace outside the home (inside it, the workspace-overlap rule
+/// masks a missing home rule). Kills: the placement's home refusal removed.
+#[test]
+fn review_an_install_root_at_the_home_refuses_with_the_workspace_elsewhere() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let home_bin = fixture.home.join("bin");
+    mkdir(&home_bin, 0o755);
+    write(&home_bin.join("agent"), &static_elf(), 0o755);
+    fixture.profile(
+        "agent",
+        &AGENT_PROFILE.replace("name = \"agent\"", "name = \"agent\"\nprogram_root = 2"),
+    );
+    let outside = fixture.root.join("outside");
+    mkdir(&outside.join(".git"), 0o755);
+    write(&outside.join(".git/HEAD"), b"ref: refs/heads/main\n", 0o644);
+    let ctx = context_with_path(
+        &fixture,
+        Box::new(platform()),
+        &outside,
+        join_path(&[&home_bin]),
+    );
+    let error = match from_path_plan(&ctx) {
+        Ok(_) => panic!("an install root at the home must refuse"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::PolicyWidening, "{error}");
+    assert_eq!(error.key_path.as_deref(), Some("--from-path"));
+    assert!(error.message.contains("home"), "{error}");
+}
+
+/// An install root that contains a writable root refuses even when the
+/// executable is not inside that writable root. Kills: the overlap reduced
+/// to "the root lies inside a writable root".
+#[test]
+fn review_an_install_root_containing_a_writable_root_refuses() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let tools = fixture.root.join("tools");
+    let cache = tools.join("cache");
+    mkdir(&cache, 0o755);
+    fixture.profile(
+        "agent",
+        &AGENT_PROFILE.replace("name = \"agent\"", "name = \"agent\"\nprogram_root = 2"),
+    );
+    let error = refused(
+        fixture.plan(
+            &fixture.repo,
+            &[
+                "--launch",
+                "agent",
+                "--from-path",
+                "--rw",
+                cache.to_str().unwrap(),
+            ],
+        ),
+        "a writable root inside the install root",
+    );
+    assert_eq!(error.code, ErrorCode::PolicyWidening, "{error}");
+    assert_eq!(error.key_path.as_deref(), Some("--from-path"));
+    assert!(
+        error.message.contains(&tools.display().to_string()),
+        "{error}"
+    );
+}
+
+/// K35 through a symlinked invocation directory: `roots.cwd` is where the
+/// operator stood, canonical; at the top level nothing is recorded, not even
+/// provenance. Kills: `child_cwd` without canonicalization, and recording an
+/// empty `roots.cwd`.
+#[test]
+fn review_roots_cwd_through_a_symlinked_invocation_directory() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    std::os::unix::fs::symlink(fixture.repo.join("src"), fixture.root.join("link")).unwrap();
+    let args = ["--launch", "agent", "--from-path"];
+    let plan = fixture.plan(&fixture.root.join("link"), &args).unwrap();
+    assert_eq!(plan.resolved.snapshot.roots.cwd.as_bytes(), b"src");
+    let top = fixture.plan(&fixture.repo, &args).unwrap();
+    assert!(
+        !top.resolved
+            .provenance
+            .iter()
+            .any(|entry| entry.key == "roots.cwd"),
+        "{:?}",
+        top.resolved.provenance
+    );
+}
+
+/// `credentials_one_of` (K42): a first source that is a dangling symlink, or
+/// that lies in a directory others can write, is present and unsafe: the run
+/// refuses and never stages the second (the paying) credential. Kills:
+/// absence judged by a following `stat` (a dangling link reads as absent),
+/// and every walk refusal read as absence.
+#[test]
+fn review_an_unsafe_first_source_never_falls_through_to_the_second() {
+    type Prepare = Box<dyn Fn(&Fixture)>;
+    let cases: [(&str, Prepare); 2] = [
+        (
+            "a dangling symlink",
+            Box::new(|fixture: &Fixture| {
+                let directory = fixture.config.join("credentials");
+                mkdir(&directory, 0o700);
+                std::os::unix::fs::symlink(fixture.root.join("nowhere"), directory.join("first"))
+                    .unwrap();
+            }),
+        ),
+        (
+            "a shared-writable directory",
+            Box::new(|fixture: &Fixture| {
+                let directory = fixture.config.join("shared");
+                mkdir(&directory, 0o700);
+                write(&directory.join("first"), b"first-value", 0o600);
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777))
+                    .unwrap();
+                fixture.profile(
+                    "agent",
+                    &AGENT_PROFILE.replace("@config/credentials/first", "@config/shared/first"),
+                );
+            }),
+        ),
+    ];
+    for (label, prepare) in cases {
+        let fixture = Fixture::new();
+        fixture.credential("second", b"second-value");
+        prepare(&fixture);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let platform = platform().on_prepare(move |plan| {
+            if let Some(launch) = plan.request.snapshot.launch.as_ref() {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .extend(launch.credentials.iter().map(|c| c.id.clone()));
+            }
+        });
+        let report = fixture.run(platform, &fixture.repo, &["agent", "-p", "x"]);
+        assert!(report.error.is_some(), "{label}: must refuse");
+        assert!(
+            !seen.lock().unwrap().iter().any(|id| id == "second"),
+            "{label}: fell through to the second credential"
+        );
+        if report.receipt.is_some() {
+            let receipt = receipt(&report);
+            assert!(
+                receipt["credentials"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|row| row["id"] != "second"),
+                "{label}: {receipt:#}"
+            );
+        }
+    }
+}
+
+/// `@program` without `--from-path` and with a relative PROGRAM refuses at
+/// the key, before anything is staged. Kills: that refusal removed (the
+/// vault then refuses later under another key).
+#[test]
+fn review_program_token_with_a_relative_program_refuses_at_its_key() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let report = fixture.run(
+        platform(),
+        &fixture.repo,
+        &["run", "--launch", "agent", "--", "agent"],
+    );
+    let error = report.error.expect("a refusal");
+    assert_eq!(error.code, ErrorCode::InvalidConfig, "{error}");
+    assert_eq!(
+        error.key_path.as_deref(),
+        Some("launch.credentials.first.binaries"),
+        "{error}"
+    );
+}
+
+/// The derived layer precedes the project file: a project `ukai.toml` may
+/// restate the install root as read-only (a narrowing within what the
+/// layers before it grant). Kills: the program layer applied after the
+/// project layer.
+#[test]
+fn review_the_project_file_comes_after_the_derived_grant() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let bin = fixture.bin.to_str().unwrap();
+    write(
+        &fixture.repo.join("ukai.toml"),
+        format!(
+            "[jail]\nschema = \"ukai.jail.policy/1\"\n[jail.filesystem]\nread_only = [\"{bin}\"]\n"
+        )
+        .as_bytes(),
+        0o644,
+    );
+    fixture
+        .plan(&fixture.repo, &["--launch", "agent", "--from-path"])
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+/// `doctor` readiness with `credentials_one_of`: one present source is
+/// enough, none is not. Kills: every listed id required, and none required.
+#[test]
+fn review_doctor_readiness_counts_one_of_once() {
+    let ready = |fixture: &Fixture| {
+        let ctx = fixture.context(Box::new(platform()), &fixture.repo);
+        let cli::Command::Doctor(args) =
+            Cli::try_parse_from(["ukai-jail", "doctor", "--launch", "agent", "--from-path"])
+                .unwrap()
+                .command
+        else {
+            unreachable!()
+        };
+        supervisor::doctor(&ctx, &args)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .ready
+    };
+    let fixture = Fixture::new();
+    assert!(!ready(&fixture), "no source present");
+    fixture.credential("second", b"second-value");
+    assert!(ready(&fixture), "the alternative is enough");
+}
+
+/// The covered skip is J12's alone: an operator's own `--ro` beneath a
+/// grant an earlier layer made (here `config.toml`) is still listed. Kills:
+/// the skip applied to every operator-grant layer.
+#[test]
+fn review_operator_grants_are_listed_even_when_covered() {
+    let fixture = Fixture::new();
+    let tools = fixture.root.join("tools");
+    write(
+        &fixture.config.join("config.toml"),
+        format!("[jail.filesystem]\nread_only = [\"{}\"]\n", tools.display()).as_bytes(),
+        0o600,
+    );
+    let plan = fixture
+        .plan(
+            &fixture.repo,
+            &["--profile", "tool", "--ro", fixture.bin.to_str().unwrap()],
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+    let listed: Vec<String> = plan
+        .resolved
+        .grants
+        .iter()
+        .filter(|grant| grant.kind == "read_only" && grant.by == "operator")
+        .map(|grant| grant.value.to_display())
+        .collect();
+    for path in [&tools, &fixture.bin] {
+        assert!(
+            listed.contains(&path.to_str().unwrap().to_owned()),
+            "{} in {listed:?}",
+            path.display()
+        );
+    }
+}
+
+/// A word that is not UTF-8 is never a launch name. Kills: such a word read
+/// as some other name.
+#[test]
+fn review_a_non_utf8_alias_word_exits_2_naming_both_readings() {
+    let fixture = Fixture::new();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ukai-jail"));
+    let output = command
+        .env_clear()
+        .env("HOME", &fixture.home)
+        .env("UKAI_DATA_DIR", &fixture.data)
+        .env("UKAI_CONFIG_DIR", &fixture.config)
+        .current_dir(&fixture.repo)
+        .arg(std::ffi::OsStr::from_bytes(b"cl\xffaude"))
+        .arg("-p")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        text(&output.stderr).contains("no verb or launch profile"),
+        "{}",
+        text(&output.stderr)
+    );
+}
+
+/// `learn` refuses `--from-path`. Kills: that refusal removed.
+#[test]
+fn review_learn_refuses_from_path() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let output = fixture.binary(
+        &fixture.repo,
+        &["learn", "--launch", "agent", "--from-path", "--", "x"],
+        None,
+    );
+    assert_ne!(output.status.code(), Some(0));
+    assert!(
+        text(&output.stderr).contains("learn does not take --from-path"),
+        "{}",
+        text(&output.stderr)
+    );
+}
+
+/// K44 on a terminal: `credential set` turns echo off, so a pasted value
+/// never comes back on the terminal. Runs the binary under `script(1)`; the
+/// value is sent a second after start, once echo is off. Kills: echo left
+/// on.
+#[test]
+fn review_credential_set_never_echoes_on_a_terminal() {
+    let script = Path::new("/usr/bin/script");
+    if !script.exists() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let value = "sk-ant-oat01-pty-fixture-value";
+    let binary = env!("CARGO_BIN_EXE_ukai-jail");
+    let inner = if cfg!(target_os = "macos") {
+        format!("/usr/bin/script -q /dev/null '{binary}' credential set first")
+    } else {
+        format!("/usr/bin/script -q -e -c \"'{binary}' credential set first\" /dev/null")
+    };
+    let output = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "(sleep 1; printf '{value}\\n\\004'; sleep 1) | {inner}"
+        ))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &fixture.home)
+        .env("UKAI_DATA_DIR", &fixture.data)
+        .env("UKAI_CONFIG_DIR", &fixture.config)
+        .current_dir(&fixture.repo)
+        .output()
+        .unwrap();
+    let terminal = text(&output.stdout);
+    assert_eq!(
+        std::fs::read(fixture.config.join("credentials/first")).ok(),
+        Some(value.as_bytes().to_vec()),
+        "{terminal:?}"
+    );
+    assert!(!terminal.contains(value), "echoed: {terminal:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Review fixes (j12-adversarial-review.md)
+// ---------------------------------------------------------------------------
+
+/// Review F1: a link the lookup follows in a directory others can write
+/// (without the sticky bit) refuses, as does an `env` word found through a
+/// symlink inside the workspace.
+#[test]
+fn review_fix_links_the_lookup_follows_must_lie_where_only_the_operator_writes() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let shared = fixture.root.join("shared");
+    mkdir(&shared, 0o777);
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    std::os::unix::fs::symlink(fixture.bin.join("agent"), shared.join("agent")).unwrap();
+    let ctx = context_with_path(
+        &fixture,
+        Box::new(platform()),
+        &fixture.repo,
+        join_path(&[&shared]),
+    );
+    let error = from_path_plan(&ctx).err().expect("a refusal");
+    assert_eq!(error.code, ErrorCode::PolicyWidening, "{error}");
+    assert_eq!(error.key_path.as_deref(), Some("--from-path"));
+    assert!(
+        error.message.contains(&shared.display().to_string()),
+        "{error}"
+    );
+
+    // `#!/usr/bin/env j12node`, `j12node` found through a symlink the
+    // repository ships.
+    let runtime = fixture.root.join("tools/rt");
+    mkdir(&runtime, 0o755);
+    write(&runtime.join("j12node"), &static_elf(), 0o755);
+    write(
+        &fixture.bin.join("agent"),
+        b"#!/usr/bin/env j12node\n",
+        0o755,
+    );
+    let planted = fixture.repo.join("node_modules/.bin");
+    mkdir(&planted, 0o755);
+    std::os::unix::fs::symlink(runtime.join("j12node"), planted.join("j12node")).unwrap();
+    let ctx = context_with_path(
+        &fixture,
+        Box::new(platform()),
+        &fixture.repo,
+        join_path(&[&fixture.bin, &planted]),
+    );
+    let error = from_path_plan(&ctx).err().expect("a refusal");
+    assert_eq!(error.key_path.as_deref(), Some("--from-path"), "{error}");
+    assert!(error.message.contains("node_modules"), "{error}");
+    // The same interpreter on PATH by its own name resolves.
+    let ctx = context_with_path(
+        &fixture,
+        Box::new(platform()),
+        &fixture.repo,
+        join_path(&[&fixture.bin, &runtime]),
+    );
+    let plan = from_path_plan(&ctx).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        plan.program
+            .as_ref()
+            .unwrap()
+            .interpreter
+            .as_ref()
+            .unwrap()
+            .path,
+        runtime.join("j12node")
+    );
+}
+
+/// Review F2: `#!/usr/bin/env X` with X in the runtime roots is a `#!`
+/// script with a system interpreter: no expansion, and `explain` says so.
+#[test]
+fn review_fix_env_with_a_system_interpreter_is_a_plain_script() {
+    let fixture = Fixture::new();
+    fixture.profile("plain", "name = \"plain\"\njail = \"tool\"\n");
+    write(&fixture.bin.join("plain"), b"#!/usr/bin/env sh\n", 0o755);
+    let report = fixture.explain(&fixture.repo, &["--launch", "plain", "--from-path"]);
+    let (program, _) = report.program.as_ref().unwrap();
+    assert_eq!(program.format.as_str(), "script");
+    assert!(program.interpreter.is_none());
+    assert_eq!(
+        program.argv_prefix(),
+        [fixture.bin.join("plain").as_os_str().as_bytes()]
+    );
+}
+
+/// Review F3: a second link made after resolution, and a write in place,
+/// both fail the recheck.
+#[test]
+fn review_fix_the_recheck_sees_a_new_link_and_a_write_in_place() {
+    use std::io::Write as _;
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let plan = fixture
+        .plan(&fixture.repo, &["--launch", "agent", "--from-path"])
+        .unwrap();
+    let program = plan.program.as_ref().unwrap();
+    program.recheck().unwrap();
+    std::fs::hard_link(fixture.bin.join("agent"), fixture.root.join("second")).unwrap();
+    assert!(program.recheck().is_err(), "a new name is a change");
+    std::fs::remove_file(fixture.root.join("second")).unwrap();
+    let plan = fixture
+        .plan(&fixture.repo, &["--launch", "agent", "--from-path"])
+        .unwrap();
+    let program = plan.program.as_ref().unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.bin.join("agent"))
+        .unwrap();
+    file.write_all(b"appended").unwrap();
+    drop(file);
+    let error = program.recheck().unwrap_err();
+    assert!(error.message.contains("identity mismatch"), "{error}");
+}
+
+/// Review F6: a project `deny_read` over the install root is disclosed as
+/// such in `explain` (text and JSON) and in the pre-exec line.
+#[test]
+fn review_fix_a_denied_install_root_is_disclosed_as_denied() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let bin = fixture.bin.to_str().unwrap();
+    write(
+        &fixture.repo.join("ukai.toml"),
+        format!(
+            "[jail]\nschema = \"ukai.jail.policy/1\"\n[jail.filesystem]\ndeny_read = [\"{bin}\"]\n"
+        )
+        .as_bytes(),
+        0o644,
+    );
+    let output = fixture.binary(
+        &fixture.repo,
+        &["explain", "--launch", "agent", "--from-path"],
+        None,
+    );
+    let stdout = text(&output.stdout);
+    assert!(
+        stdout.lines().any(|line| line
+            == format!(
+                "program read_only {bin} denied_by={bin} (the program cannot be read inside)"
+            )),
+        "{stdout}"
+    );
+    let output = fixture.binary(
+        &fixture.repo,
+        &["explain", "--launch", "agent", "--from-path", "--json"],
+        None,
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["program"]["roots"][0]["denied_by"], bin, "{json:#}");
+    let report = fixture.explain(&fixture.repo, &["--launch", "agent", "--from-path"]);
+    let (program, _) = report.program.as_ref().unwrap();
+    let line = supervisor::from_path::program_line(program, &report.resolved);
+    assert!(line.contains("denied by deny_read"), "{line}");
+}
+
+/// Review F7: from inside a nested repository, `explain` and `doctor` say
+/// the outer repository's `ukai.toml` does not apply.
+#[test]
+fn review_fix_a_nested_repository_is_disclosed() {
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    let nested = fixture.repo.join("vendor/lib");
+    mkdir(&nested.join(".git"), 0o755);
+    write(&nested.join(".git/HEAD"), b"ref: refs/heads/main\n", 0o644);
+    for verb in ["explain", "doctor"] {
+        let output = fixture.binary(&nested, &[verb, "--launch", "agent", "--from-path"], None);
+        let stdout = text(&output.stdout);
+        assert!(
+            stdout.contains(&format!("workspace nested_in {}", fixture.repo.display())),
+            "{verb}: {stdout}\n{}",
+            text(&output.stderr)
+        );
+    }
+    // Not from the outer repository itself, and not with --workspace.
+    let output = fixture.binary(
+        &fixture.repo,
+        &["explain", "--launch", "agent", "--from-path"],
+        None,
+    );
+    assert!(!text(&output.stdout).contains("nested_in"));
+}
+
+/// Review I3: a signal while `credential set` waits on a terminal puts echo
+/// back before the process ends.
+#[test]
+fn review_fix_an_interrupted_credential_set_restores_echo() {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    let fixture = Fixture::new();
+    let (mut master, mut slave) = (-1, -1);
+    // SAFETY: both pointers are to live integers the call fills; the name,
+    // termios and window size arguments may be null.
+    let rc = unsafe {
+        libc::openpty(
+            &raw mut master,
+            &raw mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+    // SAFETY: openpty returned two fresh descriptors this test now owns.
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    let echo = |fd: i32| {
+        // SAFETY: termios is plain data tcgetattr fills.
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: a live descriptor and buffer.
+        assert_eq!(unsafe { libc::tcgetattr(fd, &raw mut termios) }, 0);
+        termios.c_lflag & libc::ECHO != 0
+    };
+    assert!(echo(slave.as_raw_fd()));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ukai-jail"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &fixture.home)
+        .env("UKAI_DATA_DIR", &fixture.data)
+        .env("UKAI_CONFIG_DIR", &fixture.config)
+        .current_dir(&fixture.repo)
+        .args(["credential", "set", "first"])
+        .stdin(std::process::Stdio::from(slave.try_clone().unwrap()))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    common::eventually("echo off", std::time::Duration::from_secs(20), || {
+        !echo(slave.as_raw_fd())
+    });
+    // SAFETY: signalling the child this test started.
+    unsafe { libc::kill(i32::try_from(child.id()).unwrap(), libc::SIGINT) };
+    let status = child.wait().unwrap();
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&status),
+        Some(libc::SIGINT),
+        "the signal still ends the process"
+    );
+    assert!(echo(slave.as_raw_fd()), "echo was left off");
+    assert!(!fixture.config.join("credentials/first").exists());
+    drop(master);
 }

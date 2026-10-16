@@ -110,6 +110,79 @@ pub struct Executable {
     handle: Arc<OwnedFd>,
     /// The install root it is granted through.
     pub root: InstallRoot,
+    /// Review F1: every symbolic link the `PATH` lookup passed through to
+    /// reach it, by the link's own location (its directory resolved), so
+    /// placement can refuse a lookup a child-writable root steered.
+    pub found_through: Vec<PathBuf>,
+}
+
+/// Review F1: what a `PATH` lookup found: the canonical file and every
+/// symbolic link it followed on the way, each by its own location.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    /// The canonical file.
+    pub path: PathBuf,
+    /// The links followed, in order, each at its resolved location.
+    pub links: Vec<PathBuf>,
+}
+
+/// The most symbolic links one lookup follows (Linux's `MAXSYMLINKS`).
+const LINKS_MAX: usize = 40;
+
+/// Resolves `path` as `realpath(3)` does, by hand, recording the location of
+/// every symbolic link it follows: the link's own name in its already
+/// resolved directory.
+///
+/// # Errors
+/// The `lstat`/`readlink` error, or `ELOOP` past [`LINKS_MAX`] links.
+pub fn resolve_links(path: &Path) -> std::io::Result<Found> {
+    use std::collections::VecDeque;
+    use std::path::Component;
+    let parts = |path: &Path| -> Vec<std::ffi::OsString> {
+        path.components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(name.to_os_string()),
+                Component::ParentDir => Some("..".into()),
+                Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
+            })
+            .collect()
+    };
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not an absolute path",
+        ));
+    }
+    let mut pending: VecDeque<std::ffi::OsString> = parts(path).into();
+    let mut resolved = PathBuf::from("/");
+    let mut links = Vec::new();
+    while let Some(part) = pending.pop_front() {
+        if part == ".." {
+            resolved.pop();
+            continue;
+        }
+        let candidate = resolved.join(&part);
+        let metadata = std::fs::symlink_metadata(&candidate)?;
+        if !metadata.file_type().is_symlink() {
+            resolved = candidate;
+            continue;
+        }
+        if links.len() >= LINKS_MAX {
+            return Err(std::io::Error::from_raw_os_error(libc::ELOOP));
+        }
+        let target = std::fs::read_link(&candidate)?;
+        links.push(candidate);
+        if target.is_absolute() {
+            resolved = PathBuf::from("/");
+        }
+        for part in parts(&target).into_iter().rev() {
+            pending.push_front(part);
+        }
+    }
+    Ok(Found {
+        path: resolved,
+        links,
+    })
 }
 
 /// What the executable's first bytes say it needs (§3.3 step 5).
@@ -274,8 +347,16 @@ impl Executable {
             ("under its install root", under_root),
             ("by its path", by_path),
         ] {
-            if now.identity() != self.stat.identity()
-                || (now.kind, now.uid, now.mode) != (self.stat.kind, self.stat.uid, self.stat.mode)
+            // Review F3: size, mtime, ctime and the link count too, so a
+            // write in place or a new name since resolution is a change.
+            if !now.unchanged_since(&self.stat)
+                || (now.kind, now.uid, now.mode, now.nlink)
+                    != (
+                        self.stat.kind,
+                        self.stat.uid,
+                        self.stat.mode,
+                        self.stat.nlink,
+                    )
             {
                 return Err(changed(format!(
                     "{how} it is {}:{} {} mode {:04o}, resolved as {}:{} mode {:04o}",
@@ -342,6 +423,14 @@ pub fn in_runtime_roots(path: &Path) -> bool {
 /// # Errors
 /// [`ErrorCode::InvalidConfig`] at [`KEY`] when nothing matches.
 pub fn find_on_path(name: &str, path: Option<&[u8]>) -> Result<PathBuf, JailError> {
+    find_on_path_traced(name, path).map(|found| found.path)
+}
+
+/// [`find_on_path`], with every symbolic link the lookup followed.
+///
+/// # Errors
+/// As [`find_on_path`].
+pub fn find_on_path_traced(name: &str, path: Option<&[u8]>) -> Result<Found, JailError> {
     if name.is_empty() || name.contains('/') || name == "." || name == ".." {
         return Err(invalid(format!("`{name}` is not a program name")));
     }
@@ -358,9 +447,10 @@ pub fn find_on_path(name: &str, path: Option<&[u8]>) -> Result<PathBuf, JailErro
             continue;
         }
         let candidate = Path::new(OsStr::from_bytes(entry)).join(name);
-        let Ok(canonical) = std::fs::canonicalize(&candidate) else {
+        let Ok(found) = resolve_links(&candidate) else {
             continue;
         };
+        let canonical = found.path.clone();
         let Ok(metadata) = std::fs::metadata(&canonical) else {
             continue;
         };
@@ -370,7 +460,7 @@ pub fn find_on_path(name: &str, path: Option<&[u8]>) -> Result<PathBuf, JailErro
         // SAFETY: `c_path` is a live NUL-terminated string; access reads it.
         let executable = unsafe { libc::access(c_path.as_ptr(), libc::X_OK) } == 0;
         if metadata.is_file() && executable {
-            return Ok(canonical);
+            return Ok(found);
         }
     }
     let mut message = format!("no executable `{name}` in any absolute PATH entry");
@@ -460,6 +550,7 @@ pub fn pin(path: &Path, levels: u8) -> Result<Executable, JailError> {
             stat: root_stat,
             below,
         },
+        found_through: Vec::new(),
     })
 }
 
@@ -520,6 +611,20 @@ fn check_executable(stat: &Stat, path: &Path) -> Result<(), JailError> {
             stat.uid
         )));
     }
+    // Review F3: a program this operator can write must have one name. A
+    // second one (a package manager's hard-linked store) could lie inside a
+    // child-writable root, and a write through it would rewrite, in place,
+    // the file the operator's next unjailed launch runs. A root-owned file
+    // with several names is safe from a non-root operator's agent: it cannot
+    // write it through any of them.
+    if stat.nlink != 1 && stat.uid == crate::state::effective_uid() {
+        return Err(widening(format!(
+            "{} has {} hard links; another name for a program you can write could lie where \
+             the agent can write it",
+            path.display(),
+            stat.nlink
+        )));
+    }
     Ok(())
 }
 
@@ -573,9 +678,10 @@ fn read_at(file: &File, offset: u64, max: u64) -> std::io::Result<Vec<u8>> {
 /// # Errors
 /// The refusal of the step that failed, at [`KEY`].
 pub fn resolve(name: &str, path: Option<&[u8]>, program_root: u8) -> Result<Program, JailError> {
-    let canonical = find_on_path(name, path)?;
-    let program = pin(&canonical, program_root)?;
-    let format = classify(&program)?;
+    let found = find_on_path_traced(name, path)?;
+    let mut program = pin(&found.path, program_root)?;
+    program.found_through = found.links;
+    let mut format = classify(&program)?;
     let interpreter = match &format {
         Format::Elf { loader } => {
             check_loader(&program, loader.as_deref())?;
@@ -583,7 +689,7 @@ pub fn resolve(name: &str, path: Option<&[u8]>, program_root: u8) -> Result<Prog
         }
         Format::MachO | Format::Script { .. } => None,
         Format::EnvExpanded { env, name: word } => {
-            let found = find_on_path(word, path).map_err(|error| {
+            let found = find_on_path_traced(word, path).map_err(|error| {
                 refused(
                     ErrorCode::ExecInterpreterMissing,
                     format!(
@@ -594,7 +700,23 @@ pub fn resolve(name: &str, path: Option<&[u8]>, program_root: u8) -> Result<Prog
                     ),
                 )
             })?;
-            let interpreter = pin(&found, 1)?;
+            if in_runtime_roots(&found.path) {
+                // Review F2, §3.3 step 5: an interpreter inside the runtime
+                // roots needs nothing more; the expansion is for one outside
+                // them. This is then a `#!` script with a system
+                // interpreter, which `@program` refuses to bind.
+                format = Format::Script {
+                    interpreter: env.clone(),
+                };
+                return Ok(Program {
+                    name: name.to_owned(),
+                    program,
+                    format,
+                    interpreter: None,
+                });
+            }
+            let mut interpreter = pin(&found.path, 1)?;
+            interpreter.found_through = found.links;
             match classify(&interpreter)? {
                 Format::Elf { loader } => check_loader(&interpreter, loader.as_deref())?,
                 Format::MachO => {}
@@ -850,6 +972,51 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
 
+    /// A synthetic `fstat` result: what a second local user's object looks
+    /// like, which a single-uid test cannot create.
+    fn synthetic(kind: Kind, uid: u32, mode: u32) -> Stat {
+        Stat {
+            dev: 1,
+            ino: 2,
+            kind,
+            mode,
+            uid,
+            gid: u32::MAX - 1,
+            nlink: 1,
+            size: 0,
+            mtime: (0, 0),
+            ctime: (0, 0),
+            mount_root: Some(false),
+        }
+    }
+
+    /// The owner rules, which need a second local user to exercise end to
+    /// end: a directory on the walk and the executable owned by someone other
+    /// than root or this operator refuse; root and this operator pass.
+    #[test]
+    fn foreign_owners_refuse_on_the_walk_and_the_executable() {
+        let me = crate::state::effective_uid();
+        let other = if me == 4242 { 4243 } else { 4242 };
+        let path = Path::new("/x");
+        for in_root in [false, true] {
+            assert!(
+                check_directory(&synthetic(Kind::Directory, other, 0o755), path, in_root).is_err()
+            );
+            assert!(check_directory(&synthetic(Kind::Directory, me, 0o755), path, in_root).is_ok());
+            assert!(check_directory(&synthetic(Kind::Directory, 0, 0o755), path, in_root).is_ok());
+        }
+        assert!(check_executable(&synthetic(Kind::Regular, other, 0o755), path).is_err());
+        assert!(check_executable(&synthetic(Kind::Regular, me, 0o755), path).is_ok());
+        assert!(check_executable(&synthetic(Kind::Regular, 0, 0o755), path).is_ok());
+        // A root-owned program with several names is safe from this
+        // operator's agent; one this operator owns is not.
+        let mut linked = synthetic(Kind::Regular, 0, 0o755);
+        linked.nlink = 2;
+        assert_eq!(check_executable(&linked, path).is_ok(), me != 0);
+        linked.uid = me;
+        assert!(check_executable(&linked, path).is_err());
+    }
+
     fn tree() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -1092,5 +1259,304 @@ mod tests {
         executable(&bin.join("agent"), &elf);
         let program = resolve("agent", Some(bin.as_os_str().as_bytes()), 1).unwrap();
         assert_eq!(program.format, Format::Elf { loader: None });
+    }
+
+    // -----------------------------------------------------------------------
+    // J12 adversarial review, 2026-10-16: each kills a mutant of a gate
+    // -----------------------------------------------------------------------
+
+    fn mode(path: &Path, mode: u32) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Kills: `recheck` without the install root's owner and mode.
+    #[test]
+    fn review_recheck_refuses_an_install_root_opened_to_group_writes() {
+        let (_dir, root) = tree();
+        let bin = root.join("bin");
+        executable(&bin.join("agent"), &static_elf());
+        let program = resolve("agent", Some(bin.as_os_str().as_bytes()), 1).unwrap();
+        program.recheck().unwrap();
+        mode(&bin, 0o775);
+        let error = program.recheck().unwrap_err();
+        assert_eq!(error.code, ErrorCode::PolicyWidening, "{}", error.message);
+    }
+
+    /// Kills: `recheck` without the mode rule for directories below the
+    /// install root.
+    #[test]
+    fn review_recheck_refuses_a_directory_below_the_root_opened_to_writes() {
+        let (_dir, root) = tree();
+        let file = root.join("a/b/agent");
+        executable(&file, &static_elf());
+        mode(&root.join("a"), 0o755);
+        mode(&root.join("a/b"), 0o755);
+        let program = resolve("agent", Some(root.join("a/b").as_os_str().as_bytes()), 2).unwrap();
+        assert_eq!(program.program.root.path, root.join("a"));
+        program.recheck().unwrap();
+        mode(&root.join("a/b"), 0o777);
+        assert!(program.recheck().is_err());
+    }
+
+    /// The object the platform binds is the held root, not what its path
+    /// names: an executable replaced only inside the held root (the old
+    /// root renamed away, a new root holding the original file under the
+    /// old name) is invisible to the walk by path. Kills: `recheck` without
+    /// its walk under the held handle.
+    #[test]
+    fn review_recheck_sees_a_swap_only_the_held_root_shows() {
+        let (_dir, root) = tree();
+        let bin = root.join("bin");
+        executable(&bin.join("agent"), &static_elf());
+        let program = resolve("agent", Some(bin.as_os_str().as_bytes()), 1).unwrap();
+        let held = root.join("bin.held");
+        std::fs::rename(&bin, &held).unwrap();
+        std::fs::create_dir(&bin).unwrap();
+        mode(&bin, 0o755);
+        std::fs::rename(held.join("agent"), bin.join("agent")).unwrap();
+        executable(&held.join("agent"), b"#!/bin/sh\necho another file\n");
+        let error = program.recheck().unwrap_err();
+        assert!(
+            error.message.contains("under its install root"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// Kills: `recheck` comparing identity only (a chmod keeps the inode).
+    #[test]
+    fn review_recheck_refuses_a_changed_mode_on_the_same_inode() {
+        let (_dir, root) = tree();
+        let bin = root.join("bin");
+        executable(&bin.join("agent"), &static_elf());
+        let program = resolve("agent", Some(bin.as_os_str().as_bytes()), 1).unwrap();
+        mode(&bin.join("agent"), 0o700);
+        assert!(program.recheck().is_err());
+    }
+
+    /// Kills: `Program::recheck` checking only the program, not the
+    /// interpreter an `env` expansion pinned (the credential's binding).
+    #[test]
+    fn review_recheck_covers_the_expanded_interpreter() {
+        let (_dir, root) = tree();
+        let bin = root.join("bin");
+        let tools = root.join("tools");
+        executable(&tools.join("node"), &static_elf());
+        executable(&bin.join("agent"), b"#!/usr/bin/env node\n");
+        let program = resolve("agent", Some(&path_of(&[&bin, &tools])), 1).unwrap();
+        assert!(program.interpreter.is_some());
+        program.recheck().unwrap();
+        std::fs::rename(tools.join("node"), root.join("node.old")).unwrap();
+        executable(&tools.join("node"), &static_elf());
+        assert!(program.recheck().is_err());
+    }
+
+    /// Kills: `shebang` accepting an `env` option word, or an assignment,
+    /// as the interpreter name when a file of that name exists on PATH.
+    #[test]
+    fn review_env_options_and_assignments_are_never_expanded() {
+        let (_dir, root) = tree();
+        let bin = root.join("bin");
+        let tools = root.join("tools");
+        for word in ["-node", "A=1"] {
+            executable(&tools.join(word), &static_elf());
+            executable(
+                &bin.join("agent"),
+                format!("#!/usr/bin/env {word}\n").as_bytes(),
+            );
+            let error = resolve("agent", Some(&path_of(&[&bin, &tools])), 1).unwrap_err();
+            assert!(error.message.contains("only"), "{word}: {}", error.message);
+        }
+    }
+
+    /// Kills: `shebang` accepting an existing interpreter outside the
+    /// runtime roots.
+    #[test]
+    fn review_an_existing_interpreter_outside_the_runtime_roots_refuses() {
+        let (_dir, root) = tree();
+        let bin = root.join("bin");
+        let interp = root.join("tools/interp");
+        executable(&interp, &static_elf());
+        executable(
+            &bin.join("agent"),
+            format!("#!{}\n", interp.display()).as_bytes(),
+        );
+        let error = resolve("agent", Some(bin.as_os_str().as_bytes()), 1).unwrap_err();
+        assert_eq!(
+            error.code,
+            ErrorCode::ExecInterpreterMissing,
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("outside the runtime roots"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// Kills: `shebang` without its nested-script refusal (a `#!` file in
+    /// the runtime roots as the interpreter). Skips where none exists.
+    #[test]
+    fn review_a_system_script_as_interpreter_refuses() {
+        let Some(system_script) = ["/usr/bin", "/bin"]
+            .iter()
+            .filter_map(|dir| std::fs::read_dir(dir).ok())
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name() != Some(OsStr::new("env"))
+                    && std::fs::canonicalize(path).is_ok_and(|real| {
+                        in_runtime_roots(&real)
+                            && std::fs::read(&real).is_ok_and(|bytes| bytes.starts_with(b"#!"))
+                    })
+            })
+        else {
+            return;
+        };
+        let (_dir, root) = tree();
+        let bin = root.join("bin");
+        executable(
+            &bin.join("agent"),
+            format!("#!{}\n", system_script.display()).as_bytes(),
+        );
+        let error = resolve("agent", Some(bin.as_os_str().as_bytes()), 1).unwrap_err();
+        assert!(
+            error.message.contains("itself a script"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// Kills: `check_loader` accepting an existing loader outside the
+    /// runtime roots and the install root.
+    #[test]
+    fn review_an_existing_loader_outside_the_roots_refuses() {
+        let (_dir, root) = tree();
+        let loader = root.join("elsewhere/ld.so");
+        executable(&loader, &static_elf());
+        let interp = format!("{}\0", loader.display()).into_bytes();
+        let mut elf = vec![0u8; 64 + 56];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[32..40].copy_from_slice(&64u64.to_le_bytes());
+        elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+        elf[56..58].copy_from_slice(&1u16.to_le_bytes());
+        let offset = elf.len() as u64;
+        elf[64..68].copy_from_slice(&3u32.to_le_bytes());
+        elf[64 + 8..64 + 16].copy_from_slice(&offset.to_le_bytes());
+        elf[64 + 32..64 + 40].copy_from_slice(&(interp.len() as u64).to_le_bytes());
+        elf.extend_from_slice(&interp);
+        let bin = root.join("bin");
+        executable(&bin.join("agent"), &elf);
+        let error = resolve("agent", Some(bin.as_os_str().as_bytes()), 1).unwrap_err();
+        assert_eq!(
+            error.code,
+            ErrorCode::ExecInterpreterMissing,
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("lies outside"), "{}", error.message);
+    }
+
+    /// Kills: `pin` without its bound on `levels` (a shallow executable and
+    /// a large `program_root` would underflow the root depth).
+    #[test]
+    fn review_a_root_above_a_shallow_executable_refuses_without_panicking() {
+        for levels in [2, 3, 4] {
+            assert!(pin(Path::new("/bin/sh"), levels).is_err(), "{levels}");
+        }
+    }
+
+    /// Kills: `shebang` reading a `#!` line with no newline in the first
+    /// 256 bytes as if it ended there.
+    #[test]
+    fn review_an_overlong_shebang_line_refuses() {
+        let (_dir, root) = tree();
+        let bin = root.join("bin");
+        let mut script = b"#!/bin/sh ".to_vec();
+        script.extend(std::iter::repeat_n(b'x', 300));
+        script.push(b'\n');
+        executable(&bin.join("agent"), &script);
+        let error = resolve("agent", Some(bin.as_os_str().as_bytes()), 1).unwrap_err();
+        assert!(error.message.contains("longer than"), "{}", error.message);
+    }
+
+    /// Kills: `find_on_path` falling back to a default PATH when PATH is
+    /// unset.
+    #[test]
+    fn review_an_unset_path_resolves_nothing() {
+        assert!(find_on_path("env", None).is_err());
+        assert!(find_on_path("sh", None).is_err());
+    }
+
+    /// Kills: `check_directory` without its in-root rule. A sticky,
+    /// world-writable install root passes the writable-by-others rule (the
+    /// sticky bit), so only the in-root rule refuses it; a group-writable
+    /// one is masked by that rule wherever the group is shared (macOS).
+    #[test]
+    fn review_a_sticky_world_writable_install_root_refuses() {
+        let (_dir, root) = tree();
+        let bin = root.join("bin");
+        executable(&bin.join("agent"), &static_elf());
+        mode(&bin, 0o1777);
+        let error = pin(&bin.join("agent"), 1).unwrap_err();
+        assert_eq!(error.code, ErrorCode::PolicyWidening, "{}", error.message);
+        mode(&bin, 0o755);
+    }
+
+    /// Kills: `check_executable` without its regular-file or execute-bit
+    /// rule (`pin` is reached with whatever the path names by then).
+    #[test]
+    fn review_pin_refuses_a_directory_and_a_non_executable_file() {
+        let (_dir, root) = tree();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(bin.join("dir")).unwrap();
+        mode(&bin, 0o755);
+        mode(&bin.join("dir"), 0o755);
+        assert!(pin(&bin.join("dir"), 1).is_err());
+        executable(&bin.join("plain"), &static_elf());
+        mode(&bin.join("plain"), 0o644);
+        assert!(pin(&bin.join("plain"), 1).is_err());
+    }
+
+    /// Kills: `shebang` expanding every interpreter named `env`, not only
+    /// the runtime roots' own.
+    #[test]
+    fn review_an_env_outside_the_runtime_roots_is_not_expanded() {
+        let (_dir, root) = tree();
+        let bin = root.join("bin");
+        let tools = root.join("tools");
+        executable(&tools.join("env"), &static_elf());
+        executable(&tools.join("node"), &static_elf());
+        executable(
+            &bin.join("agent"),
+            format!("#!{} node\n", tools.join("env").display()).as_bytes(),
+        );
+        let error = resolve("agent", Some(&path_of(&[&bin, &tools])), 1).unwrap_err();
+        assert_eq!(
+            error.code,
+            ErrorCode::ExecInterpreterMissing,
+            "{}",
+            error.message
+        );
+    }
+
+    /// Kills: `in_runtime_roots` as a string prefix (`/libx32`,
+    /// `/lib.usr-is-merged` exist on Debian and Ubuntu hosts).
+    #[test]
+    fn review_runtime_roots_are_compared_by_component() {
+        for path in [
+            "/usrx/bin/node",
+            "/binary/sh",
+            "/lib.usr-is-merged/x",
+            "/libx32/ld.so",
+            "/lib64x/ld",
+        ] {
+            assert!(!in_runtime_roots(Path::new(path)), "{path}");
+        }
+        assert!(in_runtime_roots(Path::new("/usr/bin/env")));
     }
 }

@@ -538,6 +538,29 @@ mod tests {
         let secret = Secret::new("api".into(), policy, value.to_vec()).unwrap();
         Vault::new("test-attempt", vec![Arc::new(secret)]).unwrap()
     }
+    /// J12 adversarial review: the placeholder is bound under the policy's
+    /// `env`, and under `UKAI_VAULT_<ID>` only without one. Kills:
+    /// `Vault::environment` ignoring `env`.
+    #[test]
+    fn review_the_placeholder_is_bound_under_the_policy_env() {
+        let mut named = policy(&["https://api.example.com"]);
+        named.env = Some("AGENT_TOKEN".into());
+        let names = |vault: Vault| -> Vec<String> {
+            vault
+                .environment()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        };
+        assert_eq!(names(vault_of(named, b"token-value")), ["AGENT_TOKEN"]);
+        assert_eq!(
+            names(vault_of(
+                policy(&["https://api.example.com"]),
+                b"token-value"
+            )),
+            [env_name("api")]
+        );
+    }
     /// Substitutes as the proxy does for a connection with no process
     /// authority.
     fn inject(

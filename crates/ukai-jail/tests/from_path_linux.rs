@@ -220,6 +220,37 @@ fn k35_k36_the_child_starts_where_the_operator_stood_and_its_root_is_read_only()
     assert_eq!(snapshot["snapshot"]["roots"]["cwd"], "src", "{snapshot:#}");
 }
 
+/// K35 under `none`: the uncontained child starts where the operator stood
+/// beneath an explicit workspace too (review NL3: the `none` launcher's
+/// working directory).
+#[test]
+fn k35_none_starts_where_the_operator_stood() {
+    if !common::live() {
+        return;
+    }
+    let live = Live::new();
+    let cwd = live.repo.join("src");
+    let output = live.output(
+        &cwd,
+        &[
+            os("run"),
+            os("--profile"),
+            os("none"),
+            os("--workspace"),
+            live.repo.as_os_str(),
+            os("--"),
+            os("/bin/pwd"),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", report(&output));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}\n", cwd.display()),
+        "{}",
+        report(&output)
+    );
+}
+
 /// K39: on a terminal, one line naming the program and its read-only root
 /// precedes the child's first byte.
 #[test]

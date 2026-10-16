@@ -784,12 +784,12 @@ the code is stricter than §3 the text above still describes the intent.
    strictly beneath the workspace. The field is omitted from the canonical
    form at the workspace root, so a policy run from its workspace root keeps
    its bytes and digest.
-7. **`#!/usr/bin/env X` is expanded whenever that `env` is in the runtime
-   roots**, also when `X` resolves inside them (then its root is covered, not
-   granted): inside, `env` would search the fixed contained `PATH` and could
-   run another `X` than the operator's `PATH` names. Only an `env` inside the
-   runtime roots is expanded; any other interpreter named `env` is an
-   ordinary interpreter.
+7. **`#!/usr/bin/env X` follows §3.3 step 5 literally**: it is expanded only
+   when `X` resolves outside the runtime roots and that `env` is the runtime
+   roots' own; with `X` inside them it is a `#!` script with a system
+   interpreter, so `@program` refuses it as in item 2 (adversarial review F2:
+   binding the credential to `/bin/sh` or `/usr/bin/node` would admit every
+   script it runs).
 8. **Identity mismatch is `policy_widening`** at key `--from-path` (exit 125),
    before release (§3.3 step 3 names no code). A staged `@program` credential
    whose pinned executable is not the resolved one refuses the same way.
@@ -825,3 +825,33 @@ the code is stricter than §3 the text above still describes the intent.
     credential is staged.
 17. **K34's mount boundary** is tested on the walk's decision function with
     synthetic devices; a test cannot mount a filesystem unprivileged.
+18. **Symbolic links the `PATH` lookup follows** must lie outside every
+    child-writable root (bind aliases included) and in a directory owned by
+    root or the operator and not writable by others without the sticky bit
+    (adversarial review F1). §3.3 step 1 skips relative entries because the
+    repository would otherwise pick the program; an absolute entry inside
+    the repository (direnv, `node_modules/.bin`, a `.venv`) shipping a link
+    to some other trusted file did the same. The `env` word lookup is held to
+    the same rule.
+19. **A program the operator owns must have exactly one name** (review F3),
+    as a credential source must: a second name inside the workspace (a
+    bun or pnpm hard-linked store) would let the agent rewrite the host
+    program in place. A root-owned file with several names is accepted (a
+    non-root operator's agent cannot write it). The recheck before release
+    also compares size, modification and change times and the link count.
+20. **The window §3.3 step 3 leaves.** "A swap between resolution and exec
+    refuses" holds up to the recheck before release; between it and the
+    launcher's `execve` by path, a process running as the operator can rename
+    another file into the install root, and the child runs it, contained and
+    without a `@program` credential (review F5). Executing through the held
+    handle would close it for ELF programs; it is not done here.
+21. **The home refusal also compares identities** (review F4): a workspace or
+    install root that is the home, `/` or an ancestor of the home by
+    `(dev, ino)` refuses, so a bind-mount alias of the home does too.
+22. **Disclosure of a denied root and of a nested repository** (review F6,
+    F7): a derived root a `deny_read` covers is shown as denied in `explain`
+    (`denied_by`) and the pre-exec line; from inside a nested repository
+    `explain` and `doctor` name the outer repository whose `ukai.toml` does
+    not apply.
+23. **`credential set` restores the terminal on a signal** (review I3):
+    Ctrl-C, TERM, HUP or QUIT puts echo back before the process ends.
