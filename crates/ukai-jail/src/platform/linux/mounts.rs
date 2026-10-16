@@ -794,6 +794,75 @@ pub(super) fn pseudo_fs_points(rows: &[mountinfo::Row]) -> Vec<PathBuf> {
     out
 }
 
+/// This process's `/proc/self/mountinfo` rows, the one table every
+/// mount-topology guard here reads.
+///
+/// # Errors
+/// The read's error, or a table the parser refuses.
+pub(crate) fn self_mountinfo_rows() -> std::io::Result<Vec<mountinfo::Row>> {
+    mountinfo::read(Path::new("/proc/self/mountinfo"), MOUNTINFO_MAX, usize::MAX)
+}
+
+/// Finding B1 (audit 2026-10-15): a read-only grant seals only the mount it
+/// names. If the host separately mounts a writable filesystem strictly
+/// beneath the grant's source — a loop mount, a second filesystem — the
+/// kernel applies the bind's `ro` to the top mount only, and bubblewrap binds
+/// that submount read-write inside the jail. This walks the already-parsed
+/// `/proc/self/mountinfo` rows (the same table the pseudo-fs guard reads; no
+/// second parser) and refuses a read-only grant whose source contains a
+/// submount without the `ro` option. A read-write grant is never refused
+/// here: writable beneath writable grants nothing new.
+pub(crate) fn refuse_writable_submounts_under(
+    binds: &[(PathBuf, PathBuf)],
+    key: &str,
+    rows: std::io::Result<Vec<mountinfo::Row>>,
+) -> Result<(), JailError> {
+    let rows = rows.map_err(|err| {
+        error(
+            ErrorCode::BackendUnavailable,
+            ErrorStage::Preparing,
+            Remediation::HostSetup,
+            format!(
+                "this process's mount table cannot be read, so no read-only grant can be \
+                 shown to hold no writable submount: {err}"
+            ),
+        )
+        .with_key_path(key)
+    })?;
+    // Only a read-only list claims a seal a submount can break: a writable
+    // grant already admits everything beneath it, whatever its mount mode.
+    if key != "filesystem.read_only" {
+        return Ok(());
+    }
+    for (source, _destination) in binds {
+        // The check follows symlinks to the real object, exactly like the
+        // pseudo-fs guard: the seal is a property of where the grant lands,
+        // not of how the policy spelled it.
+        let resolved = std::fs::canonicalize(source).unwrap_or_else(|_| source.clone());
+        for row in &rows {
+            let point = Path::new(OsStr::from_bytes(&row.mount_point));
+            // The top mount itself is the one the `ro` bind seals; only a
+            // strictly deeper mount escapes it.
+            if point != resolved && point.starts_with(&resolved) && !row.has_option(b"ro") {
+                return Err(error(
+                    ErrorCode::PolicyWidening,
+                    ErrorStage::Preparing,
+                    Remediation::Configuration,
+                    format!(
+                        "the read-only grant {} contains the writable submount {}, which a \
+                         read-only bind does not seal (jail-v1 audit B1): mount it \
+                         read-only, or grant it separately with its own policy",
+                        source.display(),
+                        point.display()
+                    ),
+                )
+                .with_key_path(key));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The host resolver file, and where the sandbox sees its sanitized copy.
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 
@@ -1233,6 +1302,72 @@ mod tests {
             super::refuse_pseudo_fs_grants_among(&grant, "filesystem.read_only", Ok(Vec::new()))
                 .is_ok()
         );
+    }
+
+    /// Audit finding B1: a read-only grant whose source carries a separately
+    /// mounted writable submount is refused, naming the submount — the `ro`
+    /// seal reaches only the top mount.
+    #[test]
+    fn a_read_only_grant_with_a_writable_submount_is_refused_naming_it() {
+        let grant = [(PathBuf::from("/srv/data"), PathBuf::from("/srv/data"))];
+        let rows = mountinfo::rows(
+            b"30 1 0:30 / /srv/data rw - ext4 /dev/vda2 rw\n\
+              31 30 0:31 / /srv/data/loop rw - ext4 /dev/loop0 rw\n",
+            16,
+        )
+        .unwrap();
+        let error =
+            super::refuse_writable_submounts_under(&grant, "filesystem.read_only", Ok(rows))
+                .unwrap_err();
+        assert_eq!(error.code, ErrorCode::PolicyWidening);
+        assert_eq!(error.remediation, Remediation::Configuration);
+        assert!(
+            error.message.contains("/srv/data/loop"),
+            "{}",
+            error.message
+        );
+        // A table that cannot be read is no proof either: refuse, never pass.
+        let error = super::refuse_writable_submounts_under(
+            &grant,
+            "filesystem.read_only",
+            Err(std::io::Error::from_raw_os_error(libc::EACCES)),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::BackendUnavailable);
+        assert!(
+            error.message.contains("mount table cannot be read"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// A read-only grant whose submounts are all mounted read-only keeps its
+    /// seal end to end and passes.
+    #[test]
+    fn a_read_only_grant_with_only_read_only_submounts_passes() {
+        let grant = [(PathBuf::from("/srv/data"), PathBuf::from("/srv/data"))];
+        let rows = mountinfo::rows(
+            b"30 1 0:30 / /srv/data rw - ext4 /dev/vda2 rw\n\
+              31 30 0:31 / /srv/data/loop ro - ext4 /dev/loop0 rw\n\
+              32 30 0:32 / /srv/data/inner/deep ro,relatime - ext4 /dev/loop1 rw\n",
+            16,
+        )
+        .unwrap();
+        super::refuse_writable_submounts_under(&grant, "filesystem.read_only", Ok(rows)).unwrap();
+    }
+
+    /// A read-write grant is untouched by the submount check: writable
+    /// beneath writable grants nothing new.
+    #[test]
+    fn a_read_write_grant_with_a_writable_submount_is_unaffected() {
+        let grant = [(PathBuf::from("/srv/data"), PathBuf::from("/srv/data"))];
+        let rows = mountinfo::rows(
+            b"30 1 0:30 / /srv/data rw - ext4 /dev/vda2 rw\n\
+              31 30 0:31 / /srv/data/loop rw - ext4 /dev/loop0 rw\n",
+            16,
+        )
+        .unwrap();
+        super::refuse_writable_submounts_under(&grant, "filesystem.read_write", Ok(rows)).unwrap();
     }
 
     #[test]

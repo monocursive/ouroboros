@@ -44,8 +44,9 @@ use super::identity::{self, read_environment_names};
 use super::mounts::{
     PinnedBind, Placement, PlanPaths, StagedMounts, absent_runtime_candidate, host_path_of,
     is_allowed_device_node, mount_swap_rendezvous, plan_for, prepare_mounts, read_mount_table,
-    recordable_mounts, refuse_pseudo_fs_grants, refuse_unrecordable_mounts, resolve_path_ref,
-    scan_coverage, skipped_protected_names, stage_sanitized_resolv_conf, staged_mounts,
+    recordable_mounts, refuse_pseudo_fs_grants, refuse_unrecordable_mounts,
+    refuse_writable_submounts_under, resolve_path_ref, scan_coverage, self_mountinfo_rows,
+    skipped_protected_names, stage_sanitized_resolv_conf, staged_mounts,
 };
 use super::platform::{
     ARGS_FD, ERROR_FD, PINNED_FD_BASE, RELEASE_FD, SECCOMP_FD, STATUS_FD, TRACE_DATA_FD,
@@ -1456,7 +1457,28 @@ fn refuse_pseudo_fs_sources(
         refuse_pseudo_fs_grants(&[(source.clone(), source)], "scratch")?;
     }
     refuse_pseudo_fs_grants(&bplan.extra_ro_binds, "filesystem.read_only")?;
-    refuse_pseudo_fs_grants(&bplan.extra_rw_binds, "filesystem.read_write")
+    refuse_pseudo_fs_grants(&bplan.extra_rw_binds, "filesystem.read_write")?;
+    // Audit finding B1: read-only grants — and the baseline runtime roots,
+    // which are read-only binds like any grant — must not carry a writable
+    // submount the `ro` seal never reaches.
+    let mut ro_sources: Vec<(PathBuf, PathBuf)> = bplan.extra_ro_binds.clone();
+    ro_sources.extend(
+        bplan
+            .roots
+            .iter()
+            .filter(|root| {
+                matches!(
+                    root,
+                    jfs::RootSpec::RoBind(_) | jfs::RootSpec::Symlink { .. }
+                )
+            })
+            .map(|root| match root {
+                jfs::RootSpec::RoBind(path) | jfs::RootSpec::Symlink { path, .. } => {
+                    (path.clone(), path.clone())
+                }
+            }),
+    );
+    refuse_writable_submounts_under(&ro_sources, "filesystem.read_only", self_mountinfo_rows())
 }
 
 /// The baseline bubblewrap installs and whether it denies hard links. A
