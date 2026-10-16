@@ -570,7 +570,16 @@ fn untrusted_directory(directory: &Path) -> Option<String> {
         Ok(metadata) => metadata,
         Err(error) => return Some(format!("lies in {} ({error})", directory.display())),
     };
-    let (uid, mode, gid) = (metadata.uid(), metadata.mode() & 0o7777, metadata.gid());
+    untrusted_owner_or_mode(
+        directory,
+        metadata.uid(),
+        metadata.mode() & 0o7777,
+        metadata.gid(),
+    )
+}
+
+/// [`untrusted_directory`]'s rule over a directory's owner, mode and group.
+fn untrusted_owner_or_mode(directory: &Path, uid: u32, mode: u32, gid: u32) -> Option<String> {
     if uid != 0 && uid != crate::state::effective_uid() {
         return Some(format!(
             "lies in {}, owned by uid {uid}, neither root nor this operator",
@@ -840,6 +849,20 @@ mod tests {
         assert!(why.contains("ancestor"), "{why}");
         assert!(home_or_above(&home.join("repo"), &homes).is_none());
         assert!(home_or_above(&root.join("alias-of-home/repo"), &homes).is_none());
+    }
+
+    /// The owner rule of a directory holding a link the lookup followed,
+    /// which needs a second local user end to end.
+    #[test]
+    fn a_link_in_a_foreign_owned_directory_is_untrusted() {
+        let me = crate::state::effective_uid();
+        let other = if me == 4242 { 4243 } else { 4242 };
+        let path = Path::new("/x");
+        assert!(untrusted_owner_or_mode(path, other, 0o755, u32::MAX - 1).is_some());
+        assert!(untrusted_owner_or_mode(path, me, 0o755, u32::MAX - 1).is_none());
+        assert!(untrusted_owner_or_mode(path, 0, 0o755, u32::MAX - 1).is_none());
+        assert!(untrusted_owner_or_mode(path, 0, 0o777, u32::MAX - 1).is_some());
+        assert!(untrusted_owner_or_mode(path, 0, 0o1777, u32::MAX - 1).is_none());
     }
 
     #[test]

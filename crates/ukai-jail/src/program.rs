@@ -321,20 +321,21 @@ impl Executable {
         let Some((file, directories)) = self.root.below.split_last() else {
             return Err(changed("no path below its install root".to_owned()));
         };
+        let mut walked = self.root.path.clone();
         for component in directories {
+            walked.push(OsStr::from_bytes(component.as_bytes()));
             let stat = current
                 .stat_at(component)
                 .map_err(|error| changed(error.to_string()))?;
-            if stat.kind != Kind::Directory
-                || crate::state::writable_by_others(stat.mode, stat.uid, stat.gid)
-                || !trusted_owner(stat.uid)
-            {
+            if stat.kind != Kind::Directory {
                 return Err(changed(format!(
-                    "a directory below its install root is {} mode {:04o}",
-                    stat.kind.describe(),
-                    stat.mode
+                    "{} below its install root is {}",
+                    walked.display(),
+                    stat.kind.describe()
                 )));
             }
+            // The pin's own rule for a directory in the install root.
+            check_directory(&stat, &walked, true).map_err(|error| changed(error.message))?;
             current = current
                 .open_walk_at(component, Some(&stat))
                 .map_err(|error| changed(error.to_string()))?;
@@ -1295,6 +1296,10 @@ mod tests {
         assert_eq!(program.program.root.path, root.join("a"));
         program.recheck().unwrap();
         mode(&root.join("a/b"), 0o777);
+        assert!(program.recheck().is_err());
+        // Sticky does not help inside the install root: anyone may still add
+        // a file there.
+        mode(&root.join("a/b"), 0o1777);
         assert!(program.recheck().is_err());
     }
 
