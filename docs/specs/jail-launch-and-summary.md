@@ -877,13 +877,11 @@ the code is stricter than §3 the text above still describes the intent.
     refused, and X04's interpreter-missing detail holds for an exec through
     the descriptor. What remains:
     - **Files other than the program.** The pin covers the executable file
-      alone. Its ELF loader (resolution accepts one inside the install root,
-      where §3.3 step 5 says the runtime roots), libraries it loads from the
-      install root (`$ORIGIN`), and anything else it reads from there are
-      opened by path when it runs. A process running as the operator that
-      replaces one of them runs its code inside the pinned process, which a
-      `@program` credential is bound to. This predates F5 and is not closed
-      here.
+      alone; whatever else the program runs is opened by path. Since review
+      F2 of this fix (item 24), its ELF loader and every library the dynamic
+      loader can open at startup must come from the runtime roots, so none
+      of them is a file in the install root. Files it opens once it runs
+      remain (item 24).
     - **A write in place in the last instant:** a write and a close that both
       fall between the launcher's `fstat` and the kernel's refusal of writers
       inside `execveat` (two consecutive calls of the launcher). A writer
@@ -924,3 +922,78 @@ the code is stricter than §3 the text above still describes the intent.
     not apply.
 23. **`credential set` restores the terminal on a signal** (review I3):
     Ctrl-C, TERM, HUP or QUIT puts echo back before the process ends.
+24. **The loader and the library search path stay in the runtime roots**
+    (review F2 of the F5 fix, 2026-10-17). The kernel opens an ELF
+    program's loader by path at the exec, and the loader opens its libraries
+    by path, so a file in the install root that a process running as the
+    operator replaces would run inside the pinned program, which a
+    `@program` credential is bound to. J12 accepted a loader inside the
+    install root and did not look at libraries.
+    - **§3.3 step 5 is enforced as written:** the loader must lie in the
+      runtime roots (`/usr`, `/bin`, `/lib`, `/lib64`), judged by every
+      location the kernel's resolution of `PT_INTERP` passes through,
+      including where it ends. A loader in the install root, a link outside
+      the runtime roots to a system loader, and a `..` that climbs out of
+      them refuse, `exec_interpreter_missing`, though the last two end
+      inside: inside the jail such a path names something else or nothing.
+    - **The library search path is held to the same rule.** The dynamic
+      section of the pinned ELF file (`E`, or `X'` after an expansion) is
+      read as the dynamic loader reads it: at its address, mapped through
+      the `PT_LOAD` segments (not at `PT_DYNAMIC`'s file offset), up to
+      `DT_NULL`. Every `DT_RPATH` and `DT_RUNPATH` entry, with `$ORIGIN`
+      expanded to the program's own directory (what `/proc/self/exe` names
+      inside), and every library named by a path in `DT_NEEDED`, `DT_AUDIT`
+      or `DT_DEPAUDIT`, must reach only the runtime roots. A name without a
+      `/` is searched for on that path and in the system's directories.
+      Refused, `policy_widening` at `--from-path`, naming the program, the
+      tag and the entry: an entry that leaves the runtime roots (so any
+      `$ORIGIN` entry of a program in an install root); an empty or relative
+      entry, which the loader searches from the working directory, inside
+      the repository the agent writes; an entry with another `$` token
+      (`$LIB`, `$PLATFORM`), whose value resolution does not know; and a
+      library path that is relative or holds a `$` (musl opens it
+      unexpanded). A dynamic section the loader could not use (outside the
+      loaded segments, a string outside its table, two `PT_DYNAMIC`
+      headers) refuses as `invalid_config`. The check runs whether or not
+      the file names a loader.
+    - **Why refuse rather than pin those libraries:** the loader opens them
+      by path after the exec, which no descriptor the launcher holds can
+      govern, so a pin would narrow that window, not close it. The refusal
+      breaks no agent checked: on the reference host, the native binary of
+      Claude Code 2.1.295 (the npm package's `claude.exe`) and OpenCode
+      1.19.0's binary both name `/lib64/ld-linux-x86-64.so.2`, carry no
+      `DT_RPATH` or `DT_RUNPATH`, and need only system libraries named
+      without a `/` (`readelf`), and `explain --from-path` with this change
+      resolves both. Codex 0.156.1's npm entry point is a `#!/usr/bin/env
+      node` script, so its pinned ELF file is `node`; Codex's Linux native
+      binaries were not inspected. Ubuntu's `/usr/bin/node` carries
+      `DT_RUNPATH` `$ORIGIN/../lib:$ORIGIN/`, which stays in `/usr`, so it
+      resolves; the same file copied into an install root is refused. All
+      checked by hand on the reference host, 2026-10-17.
+
+    Proved by unit tests in `program.rs` (`review_f2_*`): each refusal
+    above, under `DT_RUNPATH` and `DT_RPATH` alike, and the forms that pass;
+    32- and 64-bit images in both byte orders; a decoy table at
+    `PT_DYNAMIC`'s file offset; an entry past `DT_NULL` (ignored); `$ORIGIN`
+    as the program's own directory, not its install root; the interpreter
+    an expansion pins; and, on Linux, the host shell's real headers. On the
+    reference host through the CLI (`from_path_linux.rs`, `f2_*`), under
+    `tool` and `agent`: the host's `/bin/sh` patched to use a copy of the
+    host's loader in its install root, and patched with a relative
+    `DT_RUNPATH`, each runs on the host and is refused by the jail with
+    nothing run; synthetic programs with a `$ORIGIN` entry and with an entry
+    inside the repository are refused the same way. What remains:
+    - **The runtime roots are trusted as the system's own.** A process
+      running as the operator cannot replace a file there that root owns,
+      as on a stock host; the jail does not check owners below them, nor
+      the system's library configuration (`/etc/ld.so.cache`, bound where
+      present, can name directories elsewhere).
+    - **Files the program opens once it runs:** a library it loads later by
+      a path of its own, or scripts and data it reads from the install
+      root. A process running as the operator that replaces one runs its
+      code inside the program the credential is bound to.
+    - Out of this item's scope: a process inside the jail that starts the
+      pinned program again chooses its environment (`LD_PRELOAD`,
+      `LD_LIBRARY_PATH`), and the vault identifies a connection's process by
+      its executable. No file rule addresses that (by reading; not tested
+      here).

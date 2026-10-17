@@ -529,7 +529,16 @@ With `--from-path` (which the alias implies):
   contains the workspace, the scratch or any `--rw` root (an agent that could
   rewrite its own executable would run that code with your authority on your
   next launch); or overlaps `/proc` or `/sys`.
-- **What it needs to run**: an ELF file needs its loader in the runtime roots;
+- **What it needs to run**: an ELF file needs its loader in the runtime roots,
+  reached only through them (a loader in the install root, or behind a link
+  or a `..` that leaves them, refuses, `exec_interpreter_missing`), and so
+  must every place its dynamic section lets the loader take a library from:
+  each `DT_RPATH` and `DT_RUNPATH` entry, `$ORIGIN` expanded to the program's
+  own directory, and each library named by a path. An entry outside the
+  runtime roots (`$ORIGIN` in an install root), an empty or relative one
+  (searched from the working directory, the repository), and one holding
+  `$LIB` or `$PLATFORM` refuse (`policy_widening`, naming the entry): the
+  loader opens those files by path, outside the pin;
   a `#!` interpreter in the runtime roots needs nothing more, and neither does
   `#!/usr/bin/env X` when `X` resolves inside them. When `X` resolves outside
   them, `#!/usr/bin/env X` becomes `[X', PROGRAM, ARG...]`, `X` resolved the
@@ -548,10 +557,13 @@ With `--from-path` (which the alias implies):
   (`execveat`), so a file renamed into the install root afterwards is never
   the program that runs; a change is refused as an exec error
   (`outcome.cause` `ESTALE`, `policy_widening` at `--from-path`, exit 125)
-  and nothing runs. What remains: the pin covers the program's own file,
-  not its ELF loader or the libraries and other files it opens from the
-  install root once it runs, which a process running as you can still
-  replace (its code then runs inside the program, credential included); a
+  and nothing runs. What remains: the pin covers the program's own file;
+  its loader and the libraries loaded as it starts come from the runtime
+  roots (above), which only root can change on a stock host (owners there
+  are not checked), but files it opens once it runs (a library it loads
+  later by a path of its own, scripts and data in the install root) a
+  process running as you can still replace (its code then runs inside the
+  program, credential included); a
   write in place whose write and close both fall between the launcher's
   last check and the exec (two consecutive calls; a writer still holding the
   file open makes the exec fail with `ETXTBSY`); a same-size write within

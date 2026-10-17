@@ -34,11 +34,15 @@
 //! | Introspection | `echo-args`, `stdout-bytes`, `stderr-bytes`, `env`, `fds`, `status` |
 //! | Composition | `script` (a JSON array of argv arrays, run in one process) |
 //!
+//! Beside them, [`elf`] builds synthetic ELF headers for the jail's `--from-path`
+//! resolution tests.
+//!
 //! The crate is test-only: jail-v1 §4 excludes it from packaging and from the
 //! I02 vendor-name scan. No vendor name appears in it regardless.
 
 pub mod bounded;
 pub mod cli;
+pub mod elf;
 pub mod errno;
 pub mod harness;
 pub mod net;

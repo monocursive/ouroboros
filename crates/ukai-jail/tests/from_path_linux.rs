@@ -10,8 +10,10 @@
 //! reaches a pipe; a vault placeholder is found under the agent's own name;
 //! a credential bound to `@program` is substituted for the resolved program
 //! and refused to `curl`, and `credential rm` revokes it while the run
-//! lives. The programs, repositories, origin and secret are fixtures this
-//! file creates; nothing here is an operator's.
+//! lives; a program whose loader or library search path leaves the runtime
+//! roots is refused before anything runs (review F2 of the F5 fix). The
+//! programs, repositories, origin and secret are fixtures this file
+//! creates; nothing here is an operator's.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{Read as _, Write as _};
@@ -1076,4 +1078,214 @@ fn f5_the_pinned_program_runs_though_its_path_names_another_file() {
     let receipt = live.receipt();
     assert_eq!(receipt["phase"], "settled", "{receipt:#}");
     assert_eq!(receipt["exec_observed"], true, "{receipt:#}");
+}
+
+// ---------------------------------------------------------------------------
+// Review F2 of the F5 fix: what the pin does not cover is opened by path, so
+// the loader and every library must come from the runtime roots
+// ---------------------------------------------------------------------------
+
+fn read_le(bytes: &[u8], at: usize, width: usize) -> u64 {
+    bytes[at..at + width]
+        .iter()
+        .rev()
+        .fold(0, |value, byte| (value << 8) | u64::from(*byte))
+}
+
+fn write_le(bytes: &mut [u8], at: usize, width: usize, value: u64) {
+    bytes[at..at + width].copy_from_slice(&value.to_le_bytes()[..width]);
+}
+
+/// `(header offset, p_type, p_offset, p_filesz)` of each program header of a
+/// 64-bit little-endian ELF image.
+fn program_headers(bytes: &[u8]) -> Vec<(usize, u64, u64, u64)> {
+    assert_eq!(bytes[4..6], [2, 1], "a 64-bit little-endian ELF file");
+    let phoff = usize::try_from(read_le(bytes, 32, 8)).unwrap();
+    let phentsize = usize::try_from(read_le(bytes, 54, 2)).unwrap();
+    (0..usize::try_from(read_le(bytes, 56, 2)).unwrap())
+        .map(|index| {
+            let at = phoff + index * phentsize;
+            (
+                at,
+                read_le(bytes, at, 4),
+                read_le(bytes, at + 8, 8),
+                read_le(bytes, at + 32, 8),
+            )
+        })
+        .collect()
+}
+
+/// The host's `/bin/sh` and its loader (its `PT_INTERP`, canonical).
+fn host_shell() -> (Vec<u8>, PathBuf) {
+    let bytes = std::fs::read(Path::new("/bin/sh").canonicalize().unwrap()).unwrap();
+    let (_, _, offset, size) = program_headers(&bytes)
+        .into_iter()
+        .find(|header| header.1 == 3)
+        .expect("the host's /bin/sh names a loader");
+    let (offset, size) = (
+        usize::try_from(offset).unwrap(),
+        usize::try_from(size).unwrap(),
+    );
+    let loader = &bytes[offset..offset + size];
+    let loader = Path::new(OsStr::from_bytes(loader.strip_suffix(b"\0").unwrap()));
+    (bytes.clone(), loader.canonicalize().unwrap())
+}
+
+/// Runs `program -c 'echo ran-directly'` on the host, outside any jail, from
+/// `cwd`: what it prints shows the fixture is a real program that runs.
+fn runs_directly(program: &Path, cwd: &Path) -> String {
+    let output = Command::new(program)
+        .args(["-c", "echo ran-directly"])
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", report(&output));
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// `NAME -c 'echo ran'` was refused at resolution: exit 125, nothing on
+/// stdout, stderr naming `code` and every fragment.
+fn assert_refused_at_resolution(live: &Live, name: &str, code: &str, fragments: &[&str]) {
+    let output = live.output(&live.repo, &[os(name), os("-c"), os("echo ran")]);
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "{name}: {}",
+        report(&output)
+    );
+    assert!(output.stdout.is_empty(), "{name}: {}", report(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for fragment in std::iter::once(&code).chain(fragments) {
+        assert!(
+            stderr.contains(fragment),
+            "{name}: `{fragment}` in {stderr}"
+        );
+    }
+}
+
+/// Review F2 of the F5 fix, §3.3 step 5: a program whose loader lies in its
+/// own install root is refused before anything runs. The fixture is the
+/// host's `/bin/sh` with a copy of the host's loader in the install root
+/// and its `PT_INTERP` pointed there (the kernel reads it at its file
+/// offset): it runs on the host, so before review F2 the jail ran it too,
+/// with a loader any process running as the operator could replace.
+#[test]
+fn f2_a_loader_in_the_install_root_is_refused_though_the_program_runs() {
+    if !common::live() {
+        return;
+    }
+    let live = Live::new();
+    let (mut shell, loader) = host_shell();
+    let copied = live.bin.join("ld.so");
+    std::fs::copy(&loader, &copied).unwrap();
+    std::fs::set_permissions(&copied, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (header, ..) = program_headers(&shell)
+        .into_iter()
+        .find(|header| header.1 == 3)
+        .unwrap();
+    let interp = shell.len() as u64;
+    let length = copied.as_os_str().len() as u64 + 1;
+    shell.extend_from_slice(copied.as_os_str().as_bytes());
+    shell.push(0);
+    write_le(&mut shell, header + 8, 8, interp);
+    write_le(&mut shell, header + 32, 8, length);
+    write_le(&mut shell, header + 40, 8, length);
+    write(&live.bin.join("f2loader"), &shell, 0o755);
+    assert_eq!(
+        runs_directly(&live.bin.join("f2loader"), &live.repo),
+        "ran-directly\n"
+    );
+    for jail in ["tool", "agent"] {
+        live.profile(
+            "f2loader",
+            &format!("name = \"f2loader\"\njail = \"{jail}\"\n"),
+        );
+        assert_refused_at_resolution(
+            &live,
+            "f2loader",
+            "exec_interpreter_missing",
+            &[copied.to_str().unwrap(), "outside the runtime roots"],
+        );
+    }
+}
+
+/// Review F2 of the F5 fix: a library search path entry the pin does not
+/// cover is refused before anything runs. The real case is the host's
+/// `/bin/sh` given a relative `DT_RUNPATH` (its own `libc.so.6` string, in
+/// a spare `DT_NULL` slot): it runs on the host, and the loader would
+/// search the working directory, which inside is the repository the agent
+/// writes. Synthetic programs (not runnable) cover `$ORIGIN` in the install
+/// root and an absolute entry inside the repository.
+#[test]
+fn f2_a_library_path_outside_the_runtime_roots_is_refused() {
+    if !common::live() {
+        return;
+    }
+    let live = Live::new();
+    let (mut shell, _) = host_shell();
+    let (_, _, offset, size) = program_headers(&shell)
+        .into_iter()
+        .find(|header| header.1 == 2)
+        .expect("the host's /bin/sh is dynamic");
+    let (offset, size) = (
+        usize::try_from(offset).unwrap(),
+        usize::try_from(size).unwrap(),
+    );
+    let entries: Vec<(usize, u64, u64)> = (offset..offset + size)
+        .step_by(16)
+        .map(|at| (at, read_le(&shell, at, 8), read_le(&shell, at + 8, 8)))
+        .collect();
+    let needed = entries
+        .iter()
+        .find(|entry| entry.1 == 1)
+        .expect("a DT_NEEDED")
+        .2;
+    let null = entries
+        .iter()
+        .position(|entry| entry.1 == 0)
+        .expect("a DT_NULL");
+    if entries.get(null + 1).is_none_or(|entry| entry.1 != 0) {
+        harness::skip_or_fail("the host's /bin/sh has no spare DT_NULL slot");
+        return;
+    }
+    write_le(&mut shell, entries[null].0, 8, 29);
+    write_le(&mut shell, entries[null].0 + 8, 8, needed);
+    write(&live.bin.join("f2relative"), &shell, 0o755);
+    assert_eq!(
+        runs_directly(&live.bin.join("f2relative"), &live.repo),
+        "ran-directly\n"
+    );
+
+    let image = |runpath: &[u8]| {
+        ukai_fixture::elf::Image::new()
+            .interp("/bin/sh")
+            .entry(ukai_fixture::elf::DT_RUNPATH, runpath)
+            .bytes()
+    };
+    write(&live.bin.join("f2origin"), &image(b"$ORIGIN"), 0o755);
+    let inside = live.repo.join("lib");
+    write(
+        &live.bin.join("f2workspace"),
+        &image(inside.as_os_str().as_bytes()),
+        0o755,
+    );
+    for jail in ["tool", "agent"] {
+        for (name, fragment) in [
+            ("f2relative", "relative entry"),
+            ("f2origin", "outside the runtime roots"),
+            ("f2workspace", "outside the runtime roots"),
+        ] {
+            live.profile(name, &format!("name = \"{name}\"\njail = \"{jail}\"\n"));
+            assert_refused_at_resolution(
+                &live,
+                name,
+                "policy_widening",
+                &[
+                    "DT_RUNPATH",
+                    fragment,
+                    live.bin.join(name).to_str().unwrap(),
+                ],
+            );
+        }
+    }
 }
