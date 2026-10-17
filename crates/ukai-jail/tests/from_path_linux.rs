@@ -11,7 +11,9 @@
 //! a credential bound to `@program` is substituted for the resolved program
 //! and refused to `curl`, and `credential rm` revokes it while the run
 //! lives; a program whose loader or library search path leaves the runtime
-//! roots is refused before anything runs (review F2 of the F5 fix). The
+//! roots is refused before anything runs (review F2 of the F5 fix); a
+//! program started again from inside with a dynamic-loader environment
+//! holds its identity but not the credential (review F8). The
 //! programs, repositories, origin and secret are fixtures this file
 //! creates; nothing here is an operator's.
 
@@ -703,6 +705,301 @@ fn k43_k44_the_program_bound_credential_reaches_only_the_program_until_removed()
         assert!(
             !contains(&bytes, SECRET.as_bytes()),
             "the secret is in {name}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Review F8: a contained child starts the pinned program again, and the pin
+// reads the environment it was exec'd with
+// ---------------------------------------------------------------------------
+
+/// The preload library a test plants in the workspace: its constructor makes
+/// its own HTTP request, through the proxy environment every client in the
+/// jail uses, and writes the whole answer to a file. This is attacker-chosen
+/// code running inside the pinned program's process, before and independent
+/// of anything the program's own logic does.
+const PRELOAD_C: &str = r#"
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+__attribute__((constructor)) static void f8_preload(void) {
+    FILE *report = fopen(getenv("F8_OUT") ? getenv("F8_OUT") : "/dev/null", "w");
+    if (!report) return;
+    const char *target = getenv("F8_TARGET");
+    const char *proxy = getenv("HTTP_PROXY");
+    const char *placeholder = getenv("AGENT_TOKEN");
+    if (!target || !proxy || !placeholder) {
+        fputs("no target, proxy or placeholder\n", report);
+        fclose(report);
+        return;
+    }
+    const char *colon = strrchr(proxy, ':');
+    if (!colon) { fputs("bad proxy\n", report); fclose(report); return; }
+    const char *slashes = strstr(proxy, "//");
+    const char *host_start = slashes ? slashes + 2 : proxy;
+    if (host_start > colon) { fputs("bad proxy host\n", report); fclose(report); return; }
+    char host[64];
+    size_t length = (size_t)(colon - host_start);
+    if (length >= sizeof host) { fputs("long host\n", report); fclose(report); return; }
+    memcpy(host, host_start, length);
+    host[length] = 0;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { fprintf(report, "socket: %s\n", strerror(errno)); fclose(report); return; }
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof address);
+    address.sin_family = AF_INET;
+    address.sin_port = htons((unsigned short)atoi(colon + 1));
+    if (inet_pton(AF_INET, host, &address.sin_addr) != 1) {
+        fputs("inet_pton failed\n", report);
+        fclose(report);
+        close(fd);
+        return;
+    }
+    if (connect(fd, (struct sockaddr *)&address, sizeof address) != 0) {
+        fprintf(report, "connect: %s\n", strerror(errno));
+        fclose(report);
+        close(fd);
+        return;
+    }
+    char request[1024];
+    const char *authority = strstr(target, "//");
+    authority = authority ? authority + 2 : target;
+    int length2 = snprintf(request, sizeof request,
+        "GET %s/preload HTTP/1.1\r\nHost: %s\r\nAuthorization: %s\r\nConnection: close\r\n\r\n",
+        target, authority, placeholder);
+    ssize_t written = 0;
+    while (written < length2) {
+        ssize_t n = write(fd, request + written, (size_t)(length2 - written));
+        if (n <= 0) break;
+        written += n;
+    }
+    char answer[4096];
+    ssize_t read_total = 0;
+    for (;;) {
+        if (read_total >= (ssize_t)sizeof answer - 1) break;
+        ssize_t n = read(fd, answer + read_total, (size_t)(sizeof answer - 1 - read_total));
+        if (n <= 0) break;
+        read_total += n;
+    }
+    answer[read_total < 0 ? 0 : read_total] = 0;
+    fputs(answer, report);
+    fclose(report);
+    close(fd);
+}
+"#;
+
+/// Run by the resolved program: its own request, then the same program
+/// started again from inside with the environment it inherited, then again
+/// with `LD_PRELOAD` naming the workspace library, whose constructor makes
+/// the request itself. Each result lands in the workspace or in the output.
+const F8_DRIVER: &str = r#"
+import json, os, subprocess, sys, urllib.error, urllib.request
+origin, workspace = sys.argv[1:3]
+placeholder = os.environ["AGENT_TOKEN"]
+exe = os.path.realpath("/proc/self/exe")
+out = {"exe": exe, "placeholder": placeholder}
+def request(path):
+    r = urllib.request.Request(origin + path, headers={"Authorization": placeholder})
+    try:
+        with urllib.request.urlopen(r, timeout=20) as response:
+            return {"status": str(response.status), "body": response.read().decode()}
+    except urllib.error.HTTPError as error:
+        return {"status": str(error.code), "body": error.read().decode(),
+                "reason": error.headers.get("X-Ukai-Proxy-Reason")}
+out["own"] = request("/own")
+child = (
+    "import json, os, sys, urllib.error, urllib.request\n"
+    "r = urllib.request.Request(sys.argv[1] + '/reexec',\n"
+    "    headers={'Authorization': os.environ['AGENT_TOKEN']})\n"
+    "try:\n"
+    "    with urllib.request.urlopen(r, timeout=20) as response:\n"
+    "        data = {'status': str(response.status), 'body': response.read().decode()}\n"
+    "except urllib.error.HTTPError as error:\n"
+    "    data = {'status': str(error.code), 'body': error.read().decode(),\n"
+    "            'reason': error.headers.get('X-Ukai-Proxy-Reason')}\n"
+    "open(sys.argv[2] + '/f8-reexec.json', 'w').write(json.dumps(data))\n"
+)
+subprocess.run([exe, "-c", child, origin, workspace], capture_output=True)
+out["reexec"] = json.load(open(workspace + "/f8-reexec.json"))
+preloaded = subprocess.run(
+    [exe, "-c", "pass"],
+    env={**os.environ, "LD_PRELOAD": workspace + "/libf8preload.so",
+         "F8_TARGET": origin, "F8_OUT": workspace + "/f8-preload.txt"},
+    capture_output=True,
+)
+out["preload_child"] = {"exit": preloaded.returncode,
+                        "stderr": preloaded.stderr.decode(errors="replace")}
+out["preload"] = open(workspace + "/f8-preload.txt").read()
+print(json.dumps(out))
+"#;
+
+/// Review F8: a process inside the jail can start the pinned program again
+/// with an environment of its own. Started again with the environment it
+/// inherited — what a re-running agent's subagents are — the program's
+/// requests are substituted as ever; started again with `LD_PRELOAD`
+/// naming a library in the workspace, whose constructor makes a request of
+/// its own through the proxy environment, the vault refuses the connection
+/// (`credential_process_env_denied`): the pin reads the exec-time
+/// environment of the connecting process and refuses one the dynamic loader
+/// takes code sources from.
+#[test]
+fn f8_a_reexec_of_the_pinned_program_from_inside_is_taken_from_its_environment() {
+    if !common::live() {
+        return;
+    }
+    let Ok(python) = Path::new("/usr/bin/python3").canonicalize() else {
+        harness::skip_or_fail("this host lacks /usr/bin/python3");
+        return;
+    };
+    let roots: Vec<PathBuf> = ukai_jail::profiles::LINUX_RUNTIME_ROOTS
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    if let Err(error) = ukai_jail::state::mount_alias::forbidden_identities(&roots) {
+        harness::skip_or_fail(&format!(
+            "the runtime roots cannot be placed in this host's mountinfo ({error})"
+        ));
+        return;
+    }
+    let live = Live::new();
+    let origin = Origin::start();
+    let url = format!("http://{}", origin.addr);
+    std::fs::copy(&python, live.bin.join("pyagent")).unwrap();
+    std::fs::set_permissions(
+        live.bin.join("pyagent"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let preload_c = live.repo.join("f8preload.c");
+    write(&preload_c, PRELOAD_C.as_bytes(), 0o644);
+    let compiled = live.repo.join("libf8preload.so");
+    let built = Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg("-o")
+        .arg(&compiled)
+        .arg(&preload_c)
+        .current_dir(&live.repo)
+        .output();
+    let Ok(built) = built else {
+        harness::skip_or_fail("this host has no C compiler to build the preload fixture");
+        return;
+    };
+    assert!(built.status.success(), "{}", report(&built));
+    let set = live
+        .command(&live.repo, &[os("credential"), os("set"), os("api")])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{SECRET}\n").as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert_eq!(set.status.code(), Some(0), "{}", report(&set));
+    live.profile(
+        "pyagent",
+        &format!(
+            "name = \"pyagent\"\njail = \"agent\"\n\n[credentials.api]\nmode = \"vault\"\n\
+             source = \"@config/credentials/api\"\nenv = \"AGENT_TOKEN\"\n\
+             hosts = [\"{url}\"]\nallow_plaintext = true\nbinaries = [\"@program\"]\n\n\
+             [network]\nallow = [\"{}\"]\n",
+            origin.addr
+        ),
+    );
+    let output = live
+        .command(
+            &live.repo,
+            &[
+                os("pyagent"),
+                os("-c"),
+                os(F8_DRIVER),
+                os(&url),
+                live.repo.as_os_str(),
+            ],
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let seen = origin.stop();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout {text}\nstderr {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let out: Value = serde_json::from_str(
+        text.lines()
+            .rev()
+            .find(|line| line.starts_with('{'))
+            .unwrap_or_else(|| panic!("no JSON: {text}")),
+    )
+    .unwrap();
+    let receipt = live.receipt();
+    let attempt = receipt["attempt_id"].as_str().unwrap();
+    assert_eq!(
+        out["exe"],
+        live.bin.join("pyagent").to_str().unwrap(),
+        "{out:#}"
+    );
+    assert_eq!(
+        out["placeholder"],
+        format!("vault:{attempt}:api"),
+        "{out:#}"
+    );
+    // The launched program's own request, as in K43.
+    assert_eq!(out["own"]["status"], "200", "{out:#}");
+    // The program started again from inside, with the environment inherited:
+    // the placeholder reaches it and its request is substituted (what a
+    // re-running agent needs).
+    assert_eq!(out["reexec"]["status"], "200", "{out:#}");
+    assert_eq!(out["reexec"]["body"], ORIGIN_BODY, "{out:#}");
+    // The program started again with `LD_PRELOAD`: the library's constructor
+    // (workspace code, not the program's own logic) ran, made its request
+    // through the proxy, and was refused for the environment it was exec'd
+    // with, by name. The library still loads — the refusal is the vault's,
+    // at the connection.
+    let preload = out["preload"].as_str().unwrap();
+    assert!(
+        preload.starts_with("HTTP/1.1 403"),
+        "the preload constructor's request: {preload}"
+    );
+    assert!(
+        preload.contains("credential_process_env_denied"),
+        "{preload}"
+    );
+    assert_eq!(out["preload_child"]["exit"], 0, "{out:#}");
+    // The origin saw the two requests the credential covers, with the
+    // secret and no placeholder; the refused connection never reached it.
+    for head in &seen {
+        assert!(
+            head.contains(&format!("Authorization: {SECRET}")),
+            "{seen:#?}"
+        );
+        assert!(!head.contains("vault:"), "{seen:#?}");
+    }
+    assert_eq!(seen.len(), 2, "{seen:#?}");
+    // The value is nowhere the run wrote.
+    for (label, bytes) in [
+        ("stdout", output.stdout.as_slice()),
+        ("stderr", output.stderr.as_slice()),
+    ] {
+        assert!(
+            !contains(bytes, SECRET.as_bytes()),
+            "the secret is in {label}"
         );
     }
 }

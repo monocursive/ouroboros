@@ -110,6 +110,7 @@ pub(super) fn relay(connection: &Connection<'_>) -> Result<RelayOutcome, Failure
                 reason,
                 Reason::CredentialRevoked
                     | Reason::CredentialProcessDenied
+                    | Reason::CredentialProcessEnvDenied
                     | Reason::CredentialProcessUnverified
             ) {
                 EndReason::CredentialRevoked

@@ -134,6 +134,12 @@ pub enum Reason {
     /// The connection's initiating process is not one the credential is
     /// bound to.
     CredentialProcessDenied,
+    /// The connection's initiating process was exec'd with a dynamic-loader
+    /// environment (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`), so the code
+    /// running as the bound executable is not known to come from the pinned
+    /// file and the runtime roots (§8 item 25), or that environment could not
+    /// be ruled out.
+    CredentialProcessEnvDenied,
     /// The connection's initiating process could not be established: the
     /// bridge's preamble was late or invalid, the process could not be
     /// pinned, or no authority was published within the rendezvous.
@@ -209,6 +215,7 @@ impl Reason {
             Reason::CredentialPathDenied => "credential_path_denied",
             Reason::CredentialPlacementDenied => "credential_placement_denied",
             Reason::CredentialProcessDenied => "credential_process_denied",
+            Reason::CredentialProcessEnvDenied => "credential_process_env_denied",
             Reason::CredentialProcessUnverified => "credential_process_unverified",
             Reason::CredentialRevoked => "credential_revoked",
             Reason::CredentialUnavailable => "credential_unavailable",
@@ -247,6 +254,7 @@ impl Reason {
             Reason::CredentialPathDenied
             | Reason::CredentialPlacementDenied
             | Reason::CredentialProcessDenied
+            | Reason::CredentialProcessEnvDenied
             | Reason::CredentialProcessUnverified
             | Reason::CredentialRevoked
             | Reason::CredentialUnavailable

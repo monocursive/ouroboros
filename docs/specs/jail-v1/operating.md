@@ -381,7 +381,23 @@ Further launch-profile keys (J12):
   that interpreter runs could present it; `doctor` says so). Without
   `--from-path` it binds an absolute `PROGRAM` after `--`, and a run with a
   relative one refuses naming the key. A `#!` script run by a system
-  interpreter refuses: its connections come from the interpreter.
+  interpreter refuses: its connections come from the interpreter. The
+  credential belongs to any code executed as the bound file: the agent
+  starting the program again — what its subagents are — presents it, with
+  any arguments. The vault refuses a connecting process exec'd with
+  `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT` or `GCONV_PATH` set to a
+  non-empty value (`credential_process_env_denied`) — the names under
+  which the loader or libc maps code — and an environment it cannot read
+  whole (larger than 3 MiB). A re-exec that sets one legitimately (a
+  vendored `LD_LIBRARY_PATH`, a sanitizer wrapper) loses the credential
+  for its own requests: run such a program with explicit grants and
+  without `@program`. What this does not refuse: a process that connects
+  first and taints its environment afterwards, one that overwrites its own
+  environment before connecting (measured: the rewritten strings are what
+  `/proc/PID/environ` reads), or a program that loads code at an
+  argument's request (`python -c`, Bun's `BUN_BE_BUN=1`) — see
+  jail-launch-and-summary.md §8 item 25 for what the binding does and does
+  not claim.
 - `hint = "…"` (printable, at most 512 bytes) tells how to provide a source;
   `doctor --launch` prints it for a missing one, and so does the refusal
   below.

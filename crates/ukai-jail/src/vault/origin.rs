@@ -69,6 +69,62 @@ const MAGIC: &[u8; 8] = b"UKAIPID2";
 /// client's port, then the bridge port.
 const PREAMBLE_LEN: usize = 8 + 16 + 2 + 2;
 
+/// The environment names with which the process that exec'd chose what
+/// executable code is mapped beside the program's own: a library to map
+/// before its dependencies (`LD_PRELOAD`), directories to search first
+/// (`LD_LIBRARY_PATH`), an audit module whose constructors run inside the
+/// program (`LD_AUDIT`), and the charset-conversion modules libc loads from
+/// `GCONV_PATH` when the program converts encodings — the loader's three
+/// and libc's gconv modules, the same names glibc's own setuid list
+/// singles out among its loader variables, and the same list the launch
+/// profile refuses as loader and backend names. musl honors the first two.
+/// No environment the jail hands a contained program carries any of them
+/// (the child's environment is the profile's bindings, which refuse these
+/// names at parse, plus the jail's own proxy, trust and placeholder
+/// variables), so a pinned process that carries one was given it by code
+/// inside the jail. glibc's loader takes its paths from no tunable
+/// (`--list-tunables` on the reference host names none), and its remaining
+/// loader variables load no code (`LD_DEBUG`, `LD_PROFILE` and the rest
+/// name outputs or already-loaded objects), so these four names are the
+/// whole env set that maps code.
+#[cfg(any(target_os = "linux", test))]
+const LOADER_ENV: [&[u8]; 4] = [
+    b"LD_PRELOAD",
+    b"LD_LIBRARY_PATH",
+    b"LD_AUDIT",
+    b"GCONV_PATH",
+];
+/// The most of `/proc/PID/environ` the pin reads. A full read sees any
+/// environment a stock exec can have: with the reference host's stock
+/// 8 MiB stack rlimit, an exec takes at most about 2.2 MiB of argument and
+/// environment strings, each at most 128 KiB (measured: twenty 100 KiB
+/// variables exec, twenty-one refuse). A longer file therefore cannot be
+/// the environment of an exec'd process on such a host; it is refused, not
+/// read short, since what the read did not reach could carry a name. Where
+/// the operator raised the stack rlimit, an environment of this size is
+/// possible and is refused with the rest (fail-closed).
+#[cfg(target_os = "linux")]
+const ENV_LIMIT: usize = 3 * 1024 * 1024;
+
+/// Whether an exec-time environment (NUL-separated `NAME=value`) gives the
+/// loader or libc a code source ([`LOADER_ENV`]). The name is compared up
+/// to the first `=`, byte-exactly as the kernel and the loaders compare
+/// it. An empty value is the loader's unset: glibc ignores `LD_PRELOAD=`,
+/// `LD_LIBRARY_PATH=` and `LD_AUDIT=` outright, and searches no gconv
+/// directory for an empty `GCONV_PATH` (measured with `LD_DEBUG=libs` on
+/// the reference host), so an entry whose value is empty — a bare name
+/// included — is admitted; a colon alone, by contrast, is the working
+/// directory to the loader's search, and refuses with any other non-empty
+/// value.
+#[cfg(any(target_os = "linux", test))]
+fn carries_loader_env(environ: &[u8]) -> bool {
+    environ.split(|&byte| byte == 0).any(|entry| {
+        let mut parts = entry.splitn(2, |&byte| byte == b'=');
+        let named = LOADER_ENV.contains(&parts.next().unwrap_or_default());
+        named && !parts.next().unwrap_or_default().is_empty()
+    })
+}
+
 /// A bridged connection: the client's address and port and the bridge port
 /// it reached, which with the bridge's fixed address is its whole TCP
 /// 4-tuple. Two live connections never share one, so neither can claim the
@@ -167,22 +223,39 @@ impl Drop for Reservation {
 impl Process {
     /// Pins process `pid`, which must have started at `start`: its pidfd,
     /// then its executable, read through the kernel's link with the pidfd
-    /// held, the start time checked before and after.
+    /// held, the start time checked before and after — brackets that catch
+    /// the process's death or a reused pid, never an exec, which keeps
+    /// both; the initiating thread is parked in the mediator's notification
+    /// while this runs — and then the exec-time environment as the process
+    /// stands at the connect. It must name no loader code source
+    /// ([`carries_loader_env`]): a process exec'd with one is refused, not
+    /// pinned (`credential_process_env_denied`), since the code running as
+    /// its executable then need not come from the pinned file and the
+    /// runtime roots. The environment of a process that has exited reads
+    /// short or fails, which the check after it catches; one larger than
+    /// [`ENV_LIMIT`] is refused rather than searched short. An exec that
+    /// comes after a connect is the next connection's to answer for, which
+    /// the pin cannot see (§8 item 25's disclosure).
     #[cfg(target_os = "linux")]
-    fn capture(pid: i32, start: u64, reservation: Option<Reservation>) -> Option<Self> {
+    fn capture(pid: i32, start: u64, reservation: Option<Reservation>) -> Result<Self, Reason> {
         use crate::platform::linux::identity::{pidfd_open, start_time_ticks};
-        let pidfd = pidfd_open(pid).ok()?;
+        let pidfd = pidfd_open(pid).map_err(|_| Reason::CredentialProcessUnverified)?;
         let same =
             |pidfd: &OwnedFd| alive(pidfd) && start_time_ticks(pid).is_ok_and(|t| t == start);
         if !same(&pidfd) {
-            return None;
+            return Err(Reason::CredentialProcessUnverified);
         }
-        let exe = File::open(format!("/proc/{pid}/exe")).ok()?;
-        let identity = identity(&exe).ok()?;
+        let exe = File::open(format!("/proc/{pid}/exe"))
+            .map_err(|_| Reason::CredentialProcessUnverified)?;
+        let identity = identity(&exe).map_err(|_| Reason::CredentialProcessUnverified)?;
+        let environ = read_environ(pid).map_err(|_| Reason::CredentialProcessUnverified)?;
+        if environ.len() > ENV_LIMIT || carries_loader_env(&environ) {
+            return Err(Reason::CredentialProcessEnvDenied);
+        }
         if !same(&pidfd) {
-            return None;
+            return Err(Reason::CredentialProcessUnverified);
         }
-        Some(Self(Arc::new(Pinned {
+        Ok(Self(Arc::new(Pinned {
             pid,
             _exe: exe,
             pidfd,
@@ -214,6 +287,34 @@ impl Process {
 /// A pidfd polls readable once its process has exited.
 fn alive(pidfd: &OwnedFd) -> bool {
     crate::proxy::sys::ready(pidfd.as_fd(), libc::POLLIN).is_ok_and(|exited| !exited)
+}
+
+/// The process's exec-time environment, as far as [`ENV_LIMIT`] plus one
+/// byte: bounded reads of a file the kernel serves from the process's
+/// initial stack, as the process holds it at the read (the process itself
+/// can overwrite those strings, §8 item 25). A short read beyond the limit
+/// is what a process's end gives, which the pin's checks after it refuse;
+/// the extra byte only tells a full environment from one the limit cut.
+/// The buffer grows with what is read: environments are usually a few KiB,
+/// so the bound is not reserved up front on every pinned connection.
+#[cfg(target_os = "linux")]
+fn read_environ(pid: i32) -> io::Result<Vec<u8>> {
+    let mut file = File::open(format!("/proc/{pid}/environ"))?;
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let room = ENV_LIMIT + 1 - buffer.len();
+        let want = chunk.len().min(room);
+        let read = file.read(&mut chunk[..want])?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.len() > ENV_LIMIT {
+            break;
+        }
+    }
+    Ok(buffer)
 }
 
 /// What the proxy established about the process that initiated a
@@ -427,8 +528,7 @@ impl Origins {
             // Published all the same, so the proxy learns at once that the
             // pin budget, not the process, is why there is no authority.
             None => Err(Reason::ResourceExhausted),
-            Some(reservation) => Process::capture(pid, start, Some(reservation))
-                .ok_or(Reason::CredentialProcessUnverified),
+            Some(reservation) => Process::capture(pid, start, Some(reservation)),
         };
         Some(Prepared(outcome))
     }
@@ -790,6 +890,49 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
 
+    /// The four names an exec'ing process can point the loader or libc's
+    /// gconv with are refused with any non-empty value, wherever they
+    /// stand, and nothing that merely holds one as a substring or differs
+    /// in case is; an empty value is the loaders' unset and admits, a bare
+    /// name included, while a lone colon — the working directory to the
+    /// loader's search — refuses.
+    #[test]
+    fn a_loader_environment_is_named_by_its_names_and_only_by_them() {
+        for name in ["LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "GCONV_PATH"] {
+            for entry in [
+                format!("{name}=/workspace/evil.so\0"),
+                format!("PATH=/usr/bin\0{name}=/a:/b\0HOME=/home\0"),
+                format!("{name}=a=b\0"),
+                format!("{name}=:\0"),
+            ] {
+                assert!(carries_loader_env(entry.as_bytes()), "{name}: {entry}");
+            }
+            for entry in [
+                format!("{name}=\0"),
+                format!("PATH=/usr/bin\0{name}=\0HOME=/home\0"),
+                format!("{name}\0"),
+                format!("PATH=/usr/bin\0{name}"),
+            ] {
+                assert!(!carries_loader_env(entry.as_bytes()), "{name}: {entry}");
+            }
+        }
+        for clean in [
+            "",
+            "\0",
+            "PATH=/usr/bin\0HOME=/home\0",
+            "AGENT_TOKEN=vault:attempt:api\0",
+            "ld_preload=/workspace/evil.so\0",
+            "gconv_path=/workspace/gconv\0",
+            "XLD_PRELOAD=/a\0LD_PRELOAD_X=/a\0LD_PRELOADS=/a\0",
+            "GLIBC_TUNABLES=glibc.rtld.nns=0x4\0",
+            "NODE_OPTIONS=--require /workspace/evil.js\0",
+            "LD_LIBRARY_PATHX=/a\0",
+            "LD_DEBUG=libs\0LD_PROFILE=/workspace/evil.so\0",
+        ] {
+            assert!(!carries_loader_env(clean.as_bytes()), "{clean}");
+        }
+    }
+
     #[test]
     fn the_preamble_names_the_bridged_connection_and_round_trips() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -852,9 +995,6 @@ mod linux_tests {
         let start = crate::platform::linux::identity::start_time_ticks(pid).unwrap();
         (pid, start)
     }
-    fn me() -> i32 {
-        this_process().0
-    }
 
     /// Process `pid`, which started at `start`, pinned as the mediator would
     /// pin its connect.
@@ -864,10 +1004,15 @@ mod linux_tests {
             Err(reason) => panic!("not pinned: {reason:?}"),
         }
     }
-    /// This test process, pinned as the mediator would pin a connect.
-    fn pinned(origins: &Origins) -> Process {
-        let (pid, start) = this_process();
-        pin(origins, pid, start)
+    /// A clean process, pinned as the mediator would pin its connect. Not
+    /// this test process: cargo execs the test binary with dynamic-loader
+    /// names of its own (`LD_LIBRARY_PATH`), which the pin refuses, the way
+    /// it refuses any process exec'd with them; a contained process is what
+    /// production pins.
+    fn pinned(origins: &Origins) -> (Process, Other) {
+        let child = Other::spawn();
+        let process = pin(origins, child.pid(), child.start());
+        (process, child)
     }
     /// The outcome the mediator publishes once `process` connected `client`.
     fn authority(origins: &Origins, process: Process, client: &TcpStream) -> Outcome {
@@ -947,16 +1092,39 @@ mod linux_tests {
         }
     }
 
-    /// A process that is not this one, killed when dropped.
+    /// A process that is not this one, killed when dropped. Its environment
+    /// is the test's minus the names [`LOADER_ENV`] lists, the way the jail
+    /// itself builds a contained environment: the test process may carry
+    /// them (cargo sets some for its own test runs), a contained child does
+    /// not. `spawn` returns only once the child is past its exec: until
+    /// then `/proc/PID/exe` and `/proc/PID/environ` are the test's own, and
+    /// a pin that raced the exec would read them.
     struct Other(std::process::Child);
     impl Other {
         fn spawn() -> Self {
-            Self(
-                std::process::Command::new("sleep")
-                    .arg("60")
-                    .spawn()
-                    .unwrap(),
-            )
+            Self::spawn_with(&[])
+        }
+        fn spawn_with(variables: &[(String, String)]) -> Self {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("60");
+            for name in LOADER_ENV {
+                command.env_remove(String::from_utf8_lossy(name).into_owned());
+            }
+            for (name, value) in variables {
+                command.env(name, value);
+            }
+            let child = Self(command.spawn().unwrap());
+            // The child is past its exec once its `/proc` link has left this
+            // test's own image — whatever the host's `sleep` is called.
+            let test = std::env::current_exe().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while std::fs::read_link(format!("/proc/{}/exe", child.pid()))
+                .is_ok_and(|exe| exe == test)
+            {
+                assert!(Instant::now() < deadline, "the child never exec'd");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            child
         }
         fn pid(&self) -> i32 {
             i32::try_from(self.0.id()).unwrap()
@@ -1078,11 +1246,12 @@ mod linux_tests {
         let connection = connection();
         let (_bridge, proxy) = bridged(connection.key);
         let (rx, thread) = receiving(&origins, proxy);
-        let outcome = authority(&origins, pinned(&origins), &connection.client);
+        let (process, child) = pinned(&origins);
+        let outcome = authority(&origins, process, &connection.client);
         origins.publish(connection.key, outcome);
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Ok(Seen::Pinned(me()))
+            Ok(Seen::Pinned(child.pid()))
         );
         thread.join().unwrap();
         assert!(origins.table().entries.is_empty());
@@ -1096,12 +1265,10 @@ mod linux_tests {
         let origins = configured(true, Duration::ZERO);
         let connection = connection();
         let key = connection.key;
-        origins.publish(
-            key,
-            authority(&origins, pinned(&origins), &connection.client),
-        );
+        let (process, child) = pinned(&origins);
+        origins.publish(key, authority(&origins, process, &connection.client));
         let (_bridge, proxy) = bridged(key);
-        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
+        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(child.pid())));
         assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
     }
 
@@ -1111,12 +1278,10 @@ mod linux_tests {
         let origins = configured(true, rendezvous);
         let connection = connection();
         let key = connection.key;
-        origins.publish(
-            key,
-            authority(&origins, pinned(&origins), &connection.client),
-        );
+        let (process, child) = pinned(&origins);
+        origins.publish(key, authority(&origins, process, &connection.client));
         let (_bridge, proxy) = bridged(key);
-        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
+        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(child.pid())));
         let (_replay_bridge, replay_proxy) = bridged(key);
         let began = Instant::now();
         assert_eq!(
@@ -1133,9 +1298,10 @@ mod linux_tests {
         let (_bridge, proxy) = bridged(loopback(40004, 3128));
         let (rx, thread) = receiving(&origins, proxy);
         let connection = connection();
+        let (process, _child) = pinned(&origins);
         origins.publish(
             connection.key,
-            authority(&origins, pinned(&origins), &connection.client),
+            authority(&origins, process, &connection.client),
         );
         assert!(matches!(
             rx.recv_timeout(Duration::from_millis(100)),
@@ -1161,13 +1327,12 @@ mod linux_tests {
         // An earlier connection on the same 4-tuple closed unclaimed; its
         // outcome is not the new connection's.
         origins.publish(key, refused());
-        origins.publish(
-            key,
-            authority(&origins, pinned(&origins), &connection.client),
-        );
+        let (process, child) = pinned(&origins);
+        origins.publish(key, authority(&origins, process, &connection.client));
         let (_bridge, proxy) = bridged(key);
-        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
-        let pending = authority(&origins, pinned(&origins), &connection.client);
+        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(child.pid())));
+        let (pending, _second) = pinned(&origins);
+        let pending = authority(&origins, pending, &connection.client);
         origins.stop();
         origins.publish(key, pending);
         // Stop is terminal: configuring again does not reopen it.
@@ -1189,9 +1354,10 @@ mod linux_tests {
             SocketAddr::from(([127, 0, 0, 2], connection.key.client.port())),
             connection.key.bridge_port,
         );
+        let (process, child) = pinned(&origins);
         origins.publish(
             connection.key,
-            authority(&origins, pinned(&origins), &connection.client),
+            authority(&origins, process, &connection.client),
         );
         let (_bridge, proxy) = bridged(elsewhere);
         assert_eq!(
@@ -1199,7 +1365,7 @@ mod linux_tests {
             Ok(Seen::Unverified(Reason::CredentialProcessUnverified))
         );
         let (_bridge, proxy) = bridged(connection.key);
-        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
+        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(child.pid())));
     }
 
     #[test]
@@ -1219,7 +1385,9 @@ mod linux_tests {
     #[test]
     fn a_connect_refused_at_the_pin_budget_is_published_and_named() {
         let origins = configured(true, RENDEZVOUS);
-        let held = [pinned(&origins), pinned(&origins)];
+        let (first, first_child) = pinned(&origins);
+        let (second, second_child) = pinned(&origins);
+        let held = (first, first_child, second, second_child);
         let (pid, start) = this_process();
         let prepared = origins.prepare(pid, start, BRIDGE).unwrap();
         assert!(matches!(prepared.0, Err(Reason::ResourceExhausted)));
@@ -1287,19 +1455,20 @@ mod linux_tests {
 
     #[test]
     fn only_the_kernel_pinned_executable_can_authorize_a_connection() {
-        let (pid, start) = this_process();
-        let process = Process::capture(pid, start, None).unwrap();
-        let actual = std::env::current_exe().unwrap().canonicalize().unwrap();
-        // Cargo's executable can be group writable under an operator umask.
-        // This fixture tests kernel identity separately from the production
-        // path constructor's stricter permission rule.
-        let file = File::open(actual).unwrap();
-        let authority = Executable {
-            identity: identity(&file).unwrap(),
-            file,
+        let child = Other::spawn();
+        let process = Process::capture(child.pid(), child.start(), None).unwrap();
+        // The pinned process's own executable, held by descriptor: this
+        // fixture tests kernel identity separately from the production path
+        // constructor's permission rule, which a host's `sleep` (busybox's
+        // is a symlink chain, some hosts' binaries group-writable) need not
+        // satisfy.
+        let own = File::open(format!("/proc/{}/exe", child.pid())).unwrap();
+        let allowed = Executable {
+            identity: identity(&own).unwrap(),
+            file: own,
         };
         let pinned = Initiator::Pinned(process);
-        assert!(pinned.check(&[authority]).is_ok());
+        assert!(pinned.check(&[allowed]).is_ok());
         let other = Executable::pin(
             std::path::Path::new("/usr/bin/true")
                 .canonicalize()
@@ -1313,16 +1482,60 @@ mod linux_tests {
             Initiator::Unverified(Reason::ResourceExhausted).check(&[]),
             Err(Reason::ResourceExhausted)
         );
-        assert!(Process::capture(pid, start + 1, None).is_none());
+        assert!(matches!(
+            Process::capture(child.pid(), child.start() + 1, None),
+            Err(Reason::CredentialProcessUnverified)
+        ));
+    }
+
+    /// A process exec'd with a dynamic-loader environment is refused at the
+    /// pin, by name, and takes no budget with it; the same process without
+    /// one is pinned. This is the check review F8 added: the executable's
+    /// identity alone does not say what code runs in the process.
+    #[test]
+    fn a_process_execd_with_a_loader_environment_is_refused_at_the_pin() {
+        let origins = configured(true, RENDEZVOUS);
+        for name in LOADER_ENV {
+            let name = String::from_utf8_lossy(name).into_owned();
+            let child = Other::spawn_with(&[(name.clone(), "/workspace/evil.so".to_owned())]);
+            let prepared = origins.prepare(child.pid(), child.start(), BRIDGE).unwrap();
+            assert!(
+                matches!(prepared.0, Err(Reason::CredentialProcessEnvDenied)),
+                "{name}"
+            );
+            drop(child);
+        }
+        // The refusal holds no pin: the counts are as before it.
+        assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
+        let clean = Other::spawn();
+        let prepared = origins.prepare(clean.pid(), clean.start(), BRIDGE).unwrap();
+        assert!(prepared.0.is_ok(), "the clean child was not pinned");
+    }
+
+    /// A process whose environment is large but clean is pinned, and the
+    /// names are found as far into the environment as they stand: the read
+    /// is bounded by the exec-time block itself, not by a page of it. Each
+    /// variable stays under the kernel's 128 KiB per-string exec limit.
+    #[test]
+    fn a_process_with_a_large_clean_environment_is_pinned() {
+        let origins = configured(true, RENDEZVOUS);
+        let padding = "x".repeat(96 * 1024);
+        let variables: Vec<(String, String)> = (0..8)
+            .map(|index| (format!("F8_PAD{index}"), padding.clone()))
+            .collect();
+        let child = Other::spawn_with(&variables);
+        let prepared = origins.prepare(child.pid(), child.start(), BRIDGE).unwrap();
+        assert!(prepared.0.is_ok(), "the padded child was not pinned");
     }
 
     #[test]
     fn a_live_connection_keeps_its_authority_until_it_claims_it() {
         let origins = configured(true, Duration::from_millis(50));
         let mut connection = connection();
+        let (process, child) = pinned(&origins);
         origins.publish(
             connection.key,
-            authority(&origins, pinned(&origins), &connection.client),
+            authority(&origins, process.clone(), &connection.client),
         );
         // The client sends its request and ends its side, as some clients
         // do, and the bridge reads it all; none of that ends the connection.
@@ -1344,17 +1557,14 @@ mod linux_tests {
             SocketAddr::from(([127, 0, 0, 1], connection.key.client.port() ^ 1)),
             connection.key.bridge_port,
         );
-        origins.publish(
-            elsewhere,
-            authority(&origins, pinned(&origins), &connection.client),
-        );
+        origins.publish(elsewhere, authority(&origins, process, &connection.client));
         let (_bridge, proxy) = bridged(elsewhere);
         assert_eq!(
             seen(origins.receive(&proxy)),
             Ok(Seen::Unverified(Reason::CredentialProcessUnverified))
         );
         let (_bridge, proxy) = bridged(connection.key);
-        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
+        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(child.pid())));
         assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
     }
 
@@ -1362,9 +1572,10 @@ mod linux_tests {
     fn a_connection_the_bridge_turned_away_releases_its_authority_at_once() {
         let origins = configured(true, RENDEZVOUS);
         let mut connection = connection();
+        let (process, _child) = pinned(&origins);
         origins.publish(
             connection.key,
-            authority(&origins, pinned(&origins), &connection.client),
+            authority(&origins, process, &connection.client),
         );
         // The bridge's answer at capacity: a response, then both directions
         // shut down, long before the retention runs out.
@@ -1429,10 +1640,11 @@ mod linux_tests {
         // The stale authority was dropped, not handed out.
         assert!(!origins.table().entries.contains_key(&key));
         assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
-        origins.publish(key, authority(&origins, pinned(&origins), &reused.client));
+        let (process, child) = pinned(&origins);
+        origins.publish(key, authority(&origins, process, &reused.client));
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Ok(Seen::Pinned(me()))
+            Ok(Seen::Pinned(child.pid()))
         );
         thread.join().unwrap();
         assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
@@ -1443,11 +1655,19 @@ mod linux_tests {
         const LINGER: libc::c_int = 5;
         let origins = configured(true, RENDEZVOUS);
         let (mut claimed, mut stopped) = (connection(), connection());
-        for connection in [&mut claimed, &mut stopped] {
+        let (claimed_process, claimed_child) = pinned(&origins);
+        let (stopped_process, _stopped_child) = pinned(&origins);
+        for (connection, process) in [
+            (&mut claimed, &claimed_process),
+            (&mut stopped, &stopped_process),
+        ] {
             lingering(&mut connection.client, LINGER);
-            let outcome = authority(&origins, pinned(&origins), &connection.client);
+            let outcome = authority(&origins, process.clone(), &connection.client);
             origins.publish(connection.key, outcome);
         }
+        // The published authorities hold their own pins; the test's own
+        // handles let go here so the counts below are the table's.
+        drop((claimed_process, stopped_process));
         assert_eq!(origins.sockets.load(Ordering::SeqCst), 2);
         // The process closes its own descriptors: each held duplicate is
         // its socket's last.
@@ -1455,7 +1675,10 @@ mod linux_tests {
         drop((claimed.client, stopped.client));
         let began = Instant::now();
         let (_bridge, proxy) = bridged(claimed.key);
-        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
+        assert_eq!(
+            seen(origins.receive(&proxy)),
+            Ok(Seen::Pinned(claimed_child.pid()))
+        );
         origins.stop();
         assert!(
             began.elapsed() < Duration::from_secs(1),
@@ -1477,10 +1700,8 @@ mod linux_tests {
     fn a_full_table_evicts_its_oldest_outcome_and_never_escalates_the_evicted() {
         let origins = configured(true, Duration::from_millis(50));
         let oldest = connection();
-        origins.publish(
-            oldest.key,
-            authority(&origins, pinned(&origins), &oldest.client),
-        );
+        let (process, _child) = pinned(&origins);
+        origins.publish(oldest.key, authority(&origins, process, &oldest.client));
         // Strictly older than everything published after it.
         std::thread::sleep(Duration::from_millis(2));
         let keys: Vec<Key> = (1..=MAX_ENTRIES)
@@ -1518,13 +1739,14 @@ mod linux_tests {
         let connection = connection();
         let (_bridge, proxy) = bridged(connection.key);
         let (rx, thread) = receiving(&origins, proxy);
+        let (process, child) = pinned(&origins);
         origins.publish(
             connection.key,
-            authority(&origins, pinned(&origins), &connection.client),
+            authority(&origins, process, &connection.client),
         );
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Ok(Seen::Pinned(me()))
+            Ok(Seen::Pinned(child.pid()))
         );
         thread.join().unwrap();
         assert_eq!(origins.table().entries.len(), MAX_ENTRIES - 1);

@@ -243,7 +243,15 @@ they exist at launch (`profiles.rs`, audit 2026-10-08 M5).
    after an expansion, which binds the interpreter, so any script that
    interpreter runs could use the credential; `doctor` says so). The existing
    kernel-origin check then refuses the placeholder from anything else the
-   agent spawns, such as `curl` in its shell tool (`credential_process_denied`).
+   agent spawns, such as `curl` in its shell tool
+   (`credential_process_denied`), and from a process exec'd with one of
+   `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT` or `GCONV_PATH` set to a
+   non-empty value, since the code running as the pinned file then need
+   not be the program's (`credential_process_env_denied`, §8 item 25).
+   What the check does not refuse is the program started again with an
+   inherited environment and chosen arguments, which is what a re-running
+   agent's subagents are: the credential belongs to any code executed as
+   the pinned file, and that is the disclosure `@program` makes.
 
 The install root is read-only inside, so the agent cannot update itself. The
 profile switches the updater off (`DISABLE_AUTOUPDATER=1` for Claude Code,
@@ -1058,8 +1066,105 @@ the code is stricter than §3 the text above still describes the intent.
       whose address shows another string than its file offset, overlapping
       `PT_LOAD` segments, a `PT_PHDR` the loader would read otherwise) is
       not refused: its own code runs as the program anyway.
-    - Out of this item's scope: a process inside the jail that starts the
-      pinned program again chooses its environment (`LD_PRELOAD`,
-      `LD_LIBRARY_PATH`), and the vault identifies a connection's process by
-      its executable. No file rule addresses that (by reading; not tested
-      here).
+    - A process inside the jail that starts the pinned program again chooses
+      its environment (`LD_PRELOAD`, `LD_LIBRARY_PATH`), and the vault
+      identifies a connection's process by its executable: this item's
+      final draft recorded that by reading, and review F8 then proved it on
+      the reference host and narrowed it — the vault now reads the
+      environment the connecting process was exec'd with (item 25). This
+      item's file rule does not address the re-exec itself.
+25. **The vault reads the environment a connection's process was exec'd
+    with** (review F8, 2026-10-17). The kernel-origin check identifies a
+    connection's process by its executable alone, and any contained process
+    can start the pinned program again with an environment of its own:
+    before the fix, on the reference host, the pinned program (a copy of
+    the host's `python3`) was started again from a contained child with
+    `LD_PRELOAD` naming a small library the workspace held, and that
+    library's constructor — code of the starter's choosing, not the
+    program's own logic — made a request through the proxy that was
+    substituted like the program's own; a clean re-exec was substituted
+    too, as it must be (a re-running agent's subagents are exactly that).
+    - **The narrowing:** when any credential is process-bound, the pin
+      reads `/proc/PID/environ` — the environment the exec wrote, within a
+      bound — and refuses the connection with
+      `credential_process_env_denied` when it carries one of `LD_PRELOAD`,
+      `LD_LIBRARY_PATH`, `LD_AUDIT` or `GCONV_PATH` with a non-empty value:
+      the names under which the process that exec'd chooses what executable
+      code is mapped beside the program's own — the dynamic loader's three
+      (a library to map first, directories to search first, an audit
+      module) and libc's charset-conversion modules, the same list the
+      launch profile refuses as loader and backend names. glibc's loader
+      takes its paths from no tunable (`--list-tunables` on the reference
+      host names none) and its other loader variables load no code
+      (`LD_DEBUG` and `LD_PROFILE` name outputs or already-loaded
+      objects), and musl honors the first two, so these four are the whole
+      env set that maps code. Names are compared byte-exactly as the
+      kernel compares them; an entry with the name and an empty value is
+      the loaders' unset and admits (`LD_PRELOAD=` loads nothing, an empty
+      `LD_LIBRARY_PATH=` searches nothing — measured with `LD_DEBUG=libs`
+      on the reference host — a bare name included), while a lone colon,
+      the working directory to the loader's search, refuses with any
+      non-empty value. A refusal holds no pin. No environment the jail
+      hands a contained program carries any of them — the child's
+      environment is the profile's bindings, which refuse these names at
+      parse, plus the jail's own proxy, trust and placeholder variables,
+      with the inherited environment cleared — so an honest launch is
+      unaffected, and so is the re-exec with an inherited environment.
+      That is also why binding the credential to the jail's own launched
+      target alone was rejected: it would refuse every subagent of a
+      re-running agent.
+    - **What the narrowing cannot cover, disclosed.** The check is made
+      once, at the connect: a process exec'd cleanly may connect and only
+      then exec itself again with a loader environment, keeping the
+      connection's socket open across the exec (`FD_CLOEXEC` cleared), and
+      the connection is answered by the pin it made when it was clean —
+      easier than anything below, and no different in what it yields than
+      the argument-driven loading that is admitted by design, but it
+      defeats this check, and this is where it is recorded. The
+      environment is read as `/proc/PID/environ` reports it at the
+      connect, which is the memory the exec wrote; a process can overwrite
+      its own environment strings first (that region is writable — checked
+      by hand on the reference host: a process that zeroes its `LD_PROBE=`
+      string reads as if it had never been there, its other variables
+      intact), so a payload written to defeat this check reads as clean.
+      And the four names are the loader's and gconv's only: a program that
+      loads code through its own means at an argument's request
+      (`python -c`, `node -e`, a Bun single-file binary's `BUN_BE_BUN=1`)
+      is admitted, and must be — refusing it would refuse the subagents.
+      `@program` therefore means: any code executed as the pinned file,
+      with any arguments, presents the credential. The binding narrows
+      which processes connect, not what code they run; the credential's
+      confidentiality against code the agent contains rests on that
+      disclosure (§3.3 step 7, operating.md's `@program` bullet).
+    - **What the narrowing can refuse that is not an attack:** a re-exec
+      that legitimately sets a non-empty loader name — a vendored sysroot
+      (`LD_LIBRARY_PATH=$PWD/build/lib`), a sanitizer or runtime wrapper —
+      loses the credential for that process's requests, the reason naming
+      the cause; run such a program with explicit grants and without
+      `@program`, as §3.3 already requires of `$ORIGIN`-rooted programs.
+    - **The read is bounded** at 3 MiB: on the reference host an exec with
+      the stock 8 MiB stack rlimit takes at most about 2.2 MiB of argument
+      and environment strings, each at most 128 KiB (twenty 100 KiB
+      variables exec, twenty-one refuse), so a full read sees any
+      environment a stock exec can have, and a longer file — no stock
+      exec's environment, and one the read must not read short past — is
+      refused rather than partially searched. Where the operator raised
+      the stack rlimit an environment of that size is possible and is
+      refused with it (fail-closed), the reason naming the cause; that
+      branch is not exercised on this host, where no exec can produce the
+      size.
+    Proved by: `from_path_linux.rs`
+    `f8_a_reexec_of_the_pinned_program_from_inside_is_taken_from_its_environment`
+    (live, under `agent`: the clean re-exec substituted; the `LD_PRELOAD`
+    re-exec's constructor request refused by name and never reaching the
+    origin, its library still loading; the origin saw only the two covered
+    requests, each with the secret); and in `vault/origin.rs`: the name
+    parse (each name at start, middle and end, with a value, with a `=` in
+    the value, with a lone colon; an empty value, a bare name and the
+    other loaders' variables clean; case and substring confusables clean),
+    and, on Linux, a process exec'd with each name refused at the pin and
+    holding no budget, and a process with 768 KiB of clean padding pinned.
+    The live pipeline is proven with `LD_PRELOAD`; the other three names
+    are proven at the pin. The `python3` re-exec and the preload library's
+    request were also what proved the gap, before the check existed; the
+    refusal's absence then is what the first run of this test recorded.
