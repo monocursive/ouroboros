@@ -888,6 +888,58 @@ fn f5_an_elf_program_changed_after_the_recheck_is_refused_not_run() {
     }
 }
 
+/// Review F5: a root-owned program runs. Inside the jail's user namespace
+/// its owner reads as the overflow uid, so the launcher's check must not
+/// compare owners: `sh` resolves to the host's root-owned shell under the
+/// runtime roots (a covered install root), under `tool` and `agent`.
+#[test]
+fn f5_a_root_owned_program_runs_through_its_checked_descriptor() {
+    if !common::live() {
+        return;
+    }
+    use std::os::unix::fs::MetadataExt as _;
+    let shell = Path::new("/bin/sh").canonicalize().unwrap();
+    if std::fs::metadata(&shell).unwrap().uid() != 0 {
+        harness::skip_or_fail("this host's /bin/sh is not owned by root");
+        return;
+    }
+    for jail in ["tool", "agent"] {
+        let live = Live::new();
+        live.profile("sh", &format!("name = \"sh\"\njail = \"{jail}\"\n"));
+        let output = live.output(&live.repo, &[os("sh"), os("-c"), os("echo root-owned-ran")]);
+        assert_eq!(output.status.code(), Some(0), "{jail}: {}", report(&output));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "root-owned-ran\n",
+            "{jail}"
+        );
+        let receipt = live.receipt();
+        assert_eq!(receipt["exec_observed"], true, "{jail}: {receipt:#}");
+    }
+    // With observation off the exec is confirmed without the observer: by
+    // the error pipe's end and the launcher's image having changed, which
+    // the target must live long enough for the supervisor to see.
+    let live = Live::new();
+    live.profile("sh", "name = \"sh\"\njail = \"tool\"\n");
+    let output = live.output(
+        &live.repo,
+        &[
+            os("run"),
+            os("--observe"),
+            os("off"),
+            os("--launch"),
+            os("sh"),
+            os("--from-path"),
+            os("--"),
+            os("-c"),
+            os("sleep 0.3; echo unobserved-ran"),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", report(&output));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "unobserved-ran\n");
+    assert_eq!(live.receipt()["exec_observed"], true);
+}
+
 /// Review F5: a `#!` script renamed over after the recheck is refused by the
 /// launcher's check by path, the last thing before the exec.
 #[test]

@@ -843,14 +843,18 @@ the code is stricter than §3 the text above still describes the intent.
     The recheck before release covers resolution up to the release. After
     the release, as the last thing before the exec, the launcher checks every
     pinned executable again against what resolution recorded: `(dev, ino)`,
-    size, modification and change times, link count, owner and mode (its
-    `--pin` options). An ELF file at argv 0 (`E`, or `X'` after an
+    size, modification and change times, link count and mode (its `--pin`
+    options). Not the owner: inside the jail's user namespace a root-owned
+    program's owner reads as the overflow uid, and a `chown` moves the
+    change time anyway; the recheck before release compares it on the host.
+    An ELF file at argv 0 (`E`, or `X'` after an
     expansion) is opened `O_PATH` by the launcher before the release, checked
     through that descriptor with `fstat`, and executed through it with
     `execveat(fd, "", AT_EMPTY_PATH)`, so no rename after the check can
     choose what runs; the link count and the change time (which no owner
     can set) catch a file renamed over it, given another name, written in
-    place or `chmod`ed since resolution. A changed program is refused after
+    place, `chmod`ed or `chown`ed since resolution. A changed program is
+    refused after
     the release as an exec error, `outcome.cause` `ESTALE` and
     `outcome.error.code` `policy_widening` at `--from-path` (exit 125), and
     nothing is executed; a pinned file the launcher cannot reach is the exec

@@ -61,7 +61,7 @@ pub(crate) mod flag {
     pub const SIGMASK: &str = "--sigmask";
     /// `--nofile-soft N`.
     pub const NOFILE_SOFT: &str = "--nofile-soft";
-    /// `--pin INDEX,fd|path,DEV,INO,SIZE,MTIME,MTIME_NSEC,CTIME,CTIME_NSEC,NLINK,MODE,UID`.
+    /// `--pin INDEX,fd|path,DEV,INO,SIZE,MTIME,MTIME_NSEC,CTIME,CTIME_NSEC,NLINK,MODE`.
     pub const PIN: &str = "--pin";
     /// The separator before the target's argv.
     pub const SEPARATOR: &str = "--";
@@ -384,7 +384,7 @@ pub fn pinned_image(pins: &[crate::platform::ExecPin]) -> Option<(u64, u64)> {
 /// One `--pin` value, the exact inverse of [`parse_pin`].
 fn pin_value(pin: &crate::platform::ExecPin) -> String {
     format!(
-        "{},{},{},{},{},{},{},{},{},{},{:o},{}",
+        "{},{},{},{},{},{},{},{},{},{},{:o}",
         pin.index,
         if pin.by_descriptor { "fd" } else { "path" },
         pin.identity.0,
@@ -396,12 +396,11 @@ fn pin_value(pin: &crate::platform::ExecPin) -> String {
         pin.ctime.1,
         pin.nlink,
         pin.mode,
-        pin.uid,
     )
 }
 
 fn parse_pin(raw: &OsString) -> Result<crate::platform::ExecPin, LaunchUsage> {
-    let bad = || LaunchUsage::BadPin("expected INDEX,fd|path and ten numbers");
+    let bad = || LaunchUsage::BadPin("expected INDEX,fd|path and nine numbers");
     let text = raw.to_str().ok_or_else(bad)?;
     let fields: Vec<&str> = text.split(',').collect();
     let [
@@ -416,7 +415,6 @@ fn parse_pin(raw: &OsString) -> Result<crate::platform::ExecPin, LaunchUsage> {
         ctime_ns,
         nlink,
         mode,
-        uid,
     ] = fields.as_slice()
     else {
         return Err(bad());
@@ -436,7 +434,6 @@ fn parse_pin(raw: &OsString) -> Result<crate::platform::ExecPin, LaunchUsage> {
         ctime: (signed(ctime)?, signed(ctime_ns)?),
         nlink: unsigned(nlink)?,
         mode: u32::from_str_radix(mode, 8).map_err(|_| bad())?,
-        uid: uid.parse().map_err(|_| bad())?,
     })
 }
 
@@ -469,10 +466,11 @@ fn check_pins(pins: &[crate::platform::ExecPin], argv: &[OsString]) -> Result<()
 
 /// Review F5: whether `stat` is the object `pin` recorded, unchanged: the
 /// same `(dev, ino)`, a regular file of the same size, modification and
-/// change time (nanoseconds included), link count, permission bits and
-/// owner. The change time is the field no file owner can set: a write in
-/// place, a `chmod`, a rename onto or of the file and a new or removed name
-/// all move it. Pure: no call, no allocation.
+/// change time (nanoseconds included), link count and permission bits. The
+/// change time is the field no file owner can set: a write in place, a
+/// `chmod`, a `chown` and a new or removed name all move it. The owner is
+/// not compared: in the jail's user namespace root's files read as the
+/// overflow uid. Pure: no call, no allocation.
 #[must_use]
 pub fn pin_matches(stat: &libc::stat, pin: &crate::platform::ExecPin) -> bool {
     fn wide_u64<T: Into<u64>>(value: T) -> u64 {
@@ -492,7 +490,6 @@ pub fn pin_matches(stat: &libc::stat, pin: &crate::platform::ExecPin) -> bool {
         && (wide_i64(stat.st_ctime), wide_i64(stat.st_ctime_nsec)) == pin.ctime
         && wide_u64(stat.st_nlink) == pin.nlink
         && mode & 0o7777 == pin.mode
-        && stat.st_uid == pin.uid
 }
 
 fn fd_pair(raw: Option<&OsString>, option: &'static str) -> Result<(RawFd, RawFd), LaunchUsage> {
@@ -1332,7 +1329,6 @@ mod tests {
             ctime: (-1, 0),
             nlink: 1,
             mode: 0o4755,
-            uid: 1000,
         }
     }
 
@@ -1356,7 +1352,7 @@ mod tests {
         let written = args.to_argv();
         assert!(
             written.windows(2).any(|pair| pair[0] == "--pin"
-                && pair[1] == "0,fd,2049,1234567,4096,1700000000,999999999,-1,0,1,4755,1000"),
+                && pair[1] == "0,fd,2049,1234567,4096,1700000000,999999999,-1,0,1,4755"),
             "{written:?}"
         );
         assert_eq!(parse(&written), Ok(args));
@@ -1409,12 +1405,12 @@ mod tests {
             );
         }
         for bad in [
-            "0,fd,1,2,3,4,5,6,7,8,755",
-            "0,fd,1,2,3,4,5,6,7,8,755,0,9",
-            "0,exec,1,2,3,4,5,6,7,8,755,0",
-            "0,fd,-1,2,3,4,5,6,7,8,755,0",
-            "0,fd,1,2,3,4,5,6,7,8,758,0",
-            "x,fd,1,2,3,4,5,6,7,8,755,0",
+            "0,fd,1,2,3,4,5,6,7,8",
+            "0,fd,1,2,3,4,5,6,7,8,755,0",
+            "0,exec,1,2,3,4,5,6,7,8,755",
+            "0,fd,-1,2,3,4,5,6,7,8,755",
+            "0,fd,1,2,3,4,5,6,7,8,758",
+            "x,fd,1,2,3,4,5,6,7,8,755",
             "",
         ] {
             assert!(
@@ -1464,11 +1460,10 @@ mod tests {
             ctime: recorded.ctime,
             nlink: recorded.nlink,
             mode: recorded.mode,
-            uid: recorded.uid,
         };
         assert!(pin_matches(&stat, &exact));
         type Edit = fn(&mut crate::platform::ExecPin);
-        let edits: [(&str, Edit); 10] = [
+        let edits: [(&str, Edit); 9] = [
             ("dev", |p| p.identity.0 += 1),
             ("ino", |p| p.identity.1 += 1),
             ("size", |p| p.size += 1),
@@ -1478,7 +1473,6 @@ mod tests {
             ("ctime ns", |p| p.ctime.1 += 1),
             ("nlink", |p| p.nlink += 1),
             ("mode", |p| p.mode ^= 0o100),
-            ("uid", |p| p.uid += 1),
         ];
         for (what, edit) in edits {
             let mut changed = exact;
@@ -1489,6 +1483,11 @@ mod tests {
         let mut directory = stat;
         directory.st_mode = (directory.st_mode & 0o7777) | libc::S_IFDIR;
         assert!(!pin_matches(&directory, &exact));
+        // The owner is not compared: inside the jail's user namespace a
+        // root-owned program reads as the overflow uid.
+        let mut overflow = stat;
+        overflow.st_uid = 65534;
+        assert!(pin_matches(&overflow, &exact));
     }
 
     #[test]

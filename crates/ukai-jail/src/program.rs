@@ -299,7 +299,8 @@ impl Program {
     /// Review F5: what the inside launcher checks after the release,
     /// immediately before it executes: every pinned executable at its argv
     /// index (`E` at 0, or `X'` at 0 and `E` at 1 after an `env`
-    /// expansion), compared with what resolution recorded. An ELF file at
+    /// expansion), compared with what resolution recorded (the owner aside,
+    /// see [`crate::platform::ExecPin`]). An ELF file at
     /// argv 0 is then executed through the descriptor the check opened, so
     /// no rename after the check can choose what runs. A `#!` script is
     /// opened again by name, by the kernel and by its interpreter, so it is
@@ -434,7 +435,6 @@ impl Executable {
             ctime: self.stat.ctime,
             nlink: self.stat.nlink,
             mode: self.stat.mode,
-            uid: self.stat.uid,
         }
     }
 }
@@ -1437,7 +1437,6 @@ mod tests {
                 ctime: executable.stat.ctime,
                 nlink: executable.stat.nlink,
                 mode: executable.stat.mode,
-                uid: executable.stat.uid,
             };
         executable(&bin.join("elf"), &static_elf());
         let elf = resolve("elf", Some(&path_of(&[&bin])), 1).unwrap();

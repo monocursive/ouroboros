@@ -1176,7 +1176,6 @@ fn pin_of(path: &Path, index: usize, by_descriptor: bool) -> ExecPin {
         ctime: (meta.ctime(), meta.ctime_nsec()),
         nlink: meta.nlink(),
         mode: meta.mode() & 0o7777,
-        uid: meta.uid(),
     }
 }
 
@@ -1301,6 +1300,34 @@ fn a_program_run_through_its_descriptor_sees_dev_fd_as_its_execfn() {
             .any(|line| line == format!("argv0={}", program.display())),
         "{captured:?}"
     );
+}
+
+/// Review F5, X04 through the descriptor: a pinned ELF program whose loader
+/// is missing fails with ENOENT and the interpreter-missing detail, exactly
+/// as an exec by path does.
+#[test]
+fn a_pinned_elf_program_without_its_loader_reports_the_missing_interpreter() {
+    let dir = temp_dir("pin-loader");
+    let program = dir.path().join("agent");
+    let mut bytes = fs::read(Path::new("/bin/sh").canonicalize().unwrap()).unwrap();
+    // The first `ld-linux` is the `PT_INTERP` string, right after the
+    // program headers: one byte changed names a loader that does not exist.
+    let at = bytes
+        .windows(8)
+        .position(|window| window == b"ld-linux")
+        .expect("a dynamically linked /bin/sh names its ld-linux loader");
+    bytes[at] = b'X';
+    program_file(&program, &bytes);
+    let mut launcher =
+        spawn_pinned_launcher(false, &[pin_of(&program, 0, true)], &[program.as_os_str()]);
+    launcher.release();
+    let error = launcher.error_bytes();
+    let captured = launcher.finish();
+    let failure = launch::decode_exec_failure(&error).expect("an exec failure report");
+    assert_eq!(failure.errno, libc::ENOENT, "{captured:?}");
+    assert!(failure.interpreter_missing, "{failure:?}");
+    assert!(!failure.program_changed, "{failure:?}");
+    assert_eq!(captured.code(), Some(launch::EXIT_EXEC_FAILED));
 }
 
 /// Review F5: a program renamed over, or written in place, after the

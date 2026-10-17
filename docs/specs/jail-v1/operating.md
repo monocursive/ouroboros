@@ -543,7 +543,7 @@ With `--from-path` (which the alias implies):
   since resolution refuses (`policy_widening`, "identity mismatch") and
   nothing runs. **After release**, as the last thing before the exec, the
   launcher checks it once more against what resolution recorded (identity,
-  size, times, link count, owner, mode). An ELF program is checked through a
+  size, times, link count, mode). An ELF program is checked through a
   descriptor the launcher opened and executed through that descriptor
   (`execveat`), so a file renamed into the install root afterwards is never
   the one that runs; a change is refused as an exec error (`outcome.cause`

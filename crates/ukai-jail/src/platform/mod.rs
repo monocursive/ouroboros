@@ -178,6 +178,11 @@ pub struct PreparedPlan {
 /// recorded it. The launcher compares the object it is about to execute
 /// with this after the release, so a file swapped, written or given another
 /// name since the recheck before release is refused instead of run.
+///
+/// The owner is not among the fields: inside the jail's user namespace an
+/// owner outside its mapping (root among them) reads as the overflow uid,
+/// and a `chown` moves the change time anyway. The recheck before release
+/// compares it on the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExecPin {
     /// The argv element: 0 for the program the launcher executes, 1 for the
@@ -200,8 +205,6 @@ pub struct ExecPin {
     pub nlink: u64,
     /// Permission bits (`st_mode & 07777`) of a regular file.
     pub mode: u32,
-    /// Owner.
-    pub uid: u32,
 }
 
 /// J12: one install root and the handle `--from-path` pinned it with.
