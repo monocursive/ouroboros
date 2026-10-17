@@ -50,6 +50,7 @@ From [host.txt](results/claude-setup-token-spike-2026-10-16/host.txt):
 | --- | --- |
 | Host | The Linux reference host: Ubuntu 26.04.1 LTS, Linux 7.0.0-31-generic, x86_64, account `ubuntu` |
 | Backend | bubblewrap 0.11.1 |
+| AppArmor | `kernel.apparmor_restrict_unprivileged_userns` was 0 (`doctor`: `restriction_off`), left off by that day's competitor rerun; the stock value is 1 ([correction](../README.md#corrections)) |
 | Source | `git archive` of local `dev` at `945fd370d`, so the build reports `revision unknown` |
 | Build | `cargo +1.98.1 build --release --locked -p ukai-jail`, build inputs `sha256:20fa57b7322c69a757340c06c23bb518b6486ed7de6988cf5b34ddf8d8b49651` |
 | Jail binary | `sha256:f1e40288bf6668e09c1d7d51d55c5f51005aacd929f2b55518a5cae6d14ff9fe` |

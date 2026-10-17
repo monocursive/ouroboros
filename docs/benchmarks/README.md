@@ -81,3 +81,21 @@ from the archive blobs. It also checks that HEAD still holds every member. Corpu
 `SHA256SUMS` files and the READMEs they bind are unchanged, so they still list
 the retired archives' hashes. The link checker accepts a link to a retired
 archive only when its record is in place.
+
+## Corrections
+
+Corpus READMEs bound by a `SHA256SUMS` file are never edited, so their
+corrections are recorded here.
+
+- **competitors-rerun 2026-10-16, deployment notes.** The README says the VPS
+  `kernel.apparmor_restrict_unprivileged_userns` was restored to 1 after both
+  the native suite and the coding cohort. Only the native suite's restore is
+  recorded (`raw/vps/vps-userns-before.txt` and `vps-userns-after.txt`). The
+  coding cohort's cited `raw/vps/vps-agents-userns-*.txt` files are not in the
+  corpus. The host still read 0 at 14:05 UTC that day (a `doctor` report of
+  `restriction_off`) and at 18:17 UTC, so the coding cohort's restore did not
+  take effect. The persisted value in `/usr/lib/sysctl.d/10-apparmor.conf`
+  stayed 1. The setting was set back to 1 with `sysctl -w` on 2026-10-17. Runs
+  on the reference host between the rerun and that change, such as the
+  [setup-token spike](jail/claude-setup-token-spike-2026-10-16.md), ran with
+  the restriction off.
