@@ -717,6 +717,7 @@ pub(super) fn create(
     let state = RunState::new(Launched {
         launcher,
         target_images: std::mem::take(&mut planned.target_images),
+        pinned_image: super::launch::pinned_image(&plan.exec_pins),
         release,
         error: launcher_error,
         audit,
@@ -1221,6 +1222,8 @@ fn set_launcher(
         // back the mask this supervisor inherited.
         sigmask: Some(super::launch::blocked_mask()),
         nofile_soft: launcher.nofile_soft,
+        // Review F5: checked immediately before the exec.
+        pins: plan.exec_pins.clone(),
         argv: plan
             .argv
             .iter()

@@ -1677,6 +1677,7 @@ mod tests {
             bridge: None,
             sigmask: None,
             nofile_soft: None,
+            pins: Vec::new(),
             argv: vec![OsString::from("/bin/true")],
         }
         .command_line(OsStr::new(JAIL_INSIDE_PATH));

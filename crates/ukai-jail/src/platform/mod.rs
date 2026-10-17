@@ -168,6 +168,40 @@ pub struct PreparedPlan {
     /// bound from this object, never pinned again by path, so what the
     /// child sees is the directory the executable was pinned in.
     pub pinned_roots: Vec<PinnedRoot>,
+    /// J12, review F5: the argv elements `--from-path` pinned, which the
+    /// launcher checks immediately before it executes the target; empty
+    /// without `--from-path`.
+    pub exec_pins: Vec<ExecPin>,
+}
+
+/// J12, review F5: one argv element `--from-path` pinned, as resolution
+/// recorded it. The launcher compares the object it is about to execute
+/// with this after the release, so a file swapped, written or given another
+/// name since the recheck before release is refused instead of run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecPin {
+    /// The argv element: 0 for the program the launcher executes, 1 for the
+    /// script an `env` expansion's interpreter runs.
+    pub index: usize,
+    /// Executed through the descriptor the launcher's check opened, never
+    /// by its path: an ELF file at argv 0. A `#!` script is opened again by
+    /// name, by the kernel and then by its interpreter, so it is checked by
+    /// its path instead.
+    pub by_descriptor: bool,
+    /// `(dev, ino)`.
+    pub identity: (u64, u64),
+    /// Size in bytes.
+    pub size: u64,
+    /// Modification time, seconds and nanoseconds.
+    pub mtime: (i64, i64),
+    /// Status-change time, seconds and nanoseconds.
+    pub ctime: (i64, i64),
+    /// Hard-link count.
+    pub nlink: u64,
+    /// Permission bits (`st_mode & 07777`) of a regular file.
+    pub mode: u32,
+    /// Owner.
+    pub uid: u32,
 }
 
 /// J12: one install root and the handle `--from-path` pinned it with.
@@ -382,6 +416,10 @@ pub enum ExecFailureDetail {
     /// The named file exists, but the kernel answered ENOENT: its `#!`
     /// interpreter or its ELF loader is missing.
     InterpreterMissing,
+    /// J12, review F5: a program `--from-path` pinned is no longer the
+    /// object resolution recorded when the launcher checked it, after the
+    /// release and immediately before the exec. The launcher did not exec.
+    ProgramChanged,
 }
 
 impl ExecFailureDetail {
@@ -392,6 +430,9 @@ impl ExecFailureDetail {
             ExecFailureDetail::InterpreterMissing => {
                 crate::records::ErrorCode::ExecInterpreterMissing
             }
+            // The recheck before release refuses the same change the same
+            // way (§8 item 8).
+            ExecFailureDetail::ProgramChanged => crate::records::ErrorCode::PolicyWidening,
         }
     }
 
@@ -401,6 +442,10 @@ impl ExecFailureDetail {
         match self {
             ExecFailureDetail::InterpreterMissing => {
                 "the program exists, but the interpreter or loader it names was not found"
+            }
+            ExecFailureDetail::ProgramChanged => {
+                "the program --from-path pinned changed between the recheck before release and \
+                 its exec (identity mismatch); nothing was run"
             }
         }
     }

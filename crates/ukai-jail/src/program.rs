@@ -114,6 +114,9 @@ pub struct Executable {
     /// reach it, by the link's own location (its directory resolved), so
     /// placement can refuse a lookup a child-writable root steered.
     pub found_through: Vec<PathBuf>,
+    /// Review F5: its first bytes say ELF, so the launcher can execute it
+    /// through a descriptor.
+    elf: bool,
 }
 
 /// Review F1: what a `PATH` lookup found: the canonical file and every
@@ -292,6 +295,45 @@ impl Program {
         }
         Ok(())
     }
+
+    /// Review F5: what the inside launcher checks after the release,
+    /// immediately before it executes: every pinned executable at its argv
+    /// index (`E` at 0, or `X'` at 0 and `E` at 1 after an `env`
+    /// expansion), compared with what resolution recorded. An ELF file at
+    /// argv 0 is then executed through the descriptor the check opened, so
+    /// no rename after the check can choose what runs. A `#!` script is
+    /// opened again by name, by the kernel and by its interpreter, so it is
+    /// checked by its path immediately before the exec instead.
+    #[must_use]
+    pub fn exec_pins(&self) -> Vec<crate::platform::ExecPin> {
+        match &self.interpreter {
+            Some(interpreter) => vec![interpreter.exec_pin(0), self.program.exec_pin(1)],
+            None => vec![self.program.exec_pin(0)],
+        }
+    }
+}
+
+/// Review F5: a test seam. When this variable names a directory, the
+/// supervisor writes `rechecked` there after the recheck before release and
+/// waits up to ten seconds for `go`, so a test can swap the program in the
+/// window the launcher's own check covers. Like every `UKAI_JAIL_TEST_*`
+/// variable it is recorded in jail state and in every receipt with native
+/// details; a value that is not a usable directory makes it a no-op.
+pub const SWAP_SEAM: &str = "UKAI_JAIL_TEST_PROGRAM_SWAP";
+
+/// The [`SWAP_SEAM`] rendezvous.
+pub fn swap_rendezvous() {
+    let Some(dir) = std::env::var_os(SWAP_SEAM) else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    if std::fs::write(dir.join("rechecked"), b"1").is_err() {
+        return;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !dir.join("go").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 impl Executable {
@@ -378,6 +420,22 @@ impl Executable {
     #[must_use]
     pub fn identity(&self) -> (u64, u64) {
         self.stat.identity()
+    }
+
+    /// Review F5: this executable as the launcher checks it at argv
+    /// `index`; executed through a descriptor only as an ELF argv 0.
+    fn exec_pin(&self, index: usize) -> crate::platform::ExecPin {
+        crate::platform::ExecPin {
+            index,
+            by_descriptor: index == 0 && self.elf,
+            identity: self.stat.identity(),
+            size: self.stat.size,
+            mtime: self.stat.mtime,
+            ctime: self.stat.ctime,
+            nlink: self.stat.nlink,
+            mode: self.stat.mode,
+            uid: self.stat.uid,
+        }
     }
 }
 
@@ -552,6 +610,7 @@ pub fn pin(path: &Path, levels: u8) -> Result<Executable, JailError> {
             below,
         },
         found_through: Vec::new(),
+        elf: false,
     })
 }
 
@@ -683,6 +742,7 @@ pub fn resolve(name: &str, path: Option<&[u8]>, program_root: u8) -> Result<Prog
     let mut program = pin(&found.path, program_root)?;
     program.found_through = found.links;
     let mut format = classify(&program)?;
+    program.elf = matches!(format, Format::Elf { .. });
     let interpreter = match &format {
         Format::Elf { loader } => {
             check_loader(&program, loader.as_deref())?;
@@ -719,7 +779,10 @@ pub fn resolve(name: &str, path: Option<&[u8]>, program_root: u8) -> Result<Prog
             let mut interpreter = pin(&found.path, 1)?;
             interpreter.found_through = found.links;
             match classify(&interpreter)? {
-                Format::Elf { loader } => check_loader(&interpreter, loader.as_deref())?,
+                Format::Elf { loader } => {
+                    check_loader(&interpreter, loader.as_deref())?;
+                    interpreter.elf = true;
+                }
                 Format::MachO => {}
                 Format::Script { .. } | Format::EnvExpanded { .. } => {
                     return Err(invalid(format!(
@@ -1354,6 +1417,51 @@ mod tests {
         std::fs::rename(tools.join("node"), root.join("node.old")).unwrap();
         executable(&tools.join("node"), &static_elf());
         assert!(program.recheck().is_err());
+    }
+
+    /// Review F5: the launcher's pins are what resolution recorded, at the
+    /// argv index each executable takes; only an ELF argv 0 is executed by
+    /// descriptor, a script by its path.
+    #[test]
+    fn exec_pins_follow_the_argv_and_only_an_elf_argv0_runs_by_descriptor() {
+        let (_dir, root) = tree();
+        let bin = root.join("bin");
+        let tools = root.join("tools");
+        let expect =
+            |executable: &Executable, index: usize, by_descriptor: bool| crate::platform::ExecPin {
+                index,
+                by_descriptor,
+                identity: executable.stat.identity(),
+                size: executable.stat.size,
+                mtime: executable.stat.mtime,
+                ctime: executable.stat.ctime,
+                nlink: executable.stat.nlink,
+                mode: executable.stat.mode,
+                uid: executable.stat.uid,
+            };
+        executable(&bin.join("elf"), &static_elf());
+        let elf = resolve("elf", Some(&path_of(&[&bin])), 1).unwrap();
+        assert_eq!(elf.exec_pins(), [expect(&elf.program, 0, true)]);
+
+        executable(&bin.join("script"), b"#!/bin/sh\n");
+        let script = resolve("script", Some(&path_of(&[&bin])), 1).unwrap();
+        assert_eq!(script.exec_pins(), [expect(&script.program, 0, false)]);
+
+        executable(&tools.join("node"), &static_elf());
+        executable(&bin.join("agent"), b"#!/usr/bin/env node\n");
+        let expanded = resolve("agent", Some(&path_of(&[&bin, &tools])), 1).unwrap();
+        let interpreter = expanded.interpreter.as_ref().unwrap();
+        assert_eq!(
+            expanded.exec_pins(),
+            [
+                expect(interpreter, 0, true),
+                expect(&expanded.program, 1, false)
+            ]
+        );
+        // The pins and the argv prefix name the same elements.
+        let argv = expanded.argv_prefix();
+        assert_eq!(argv[0], interpreter.path.as_os_str().as_bytes());
+        assert_eq!(argv[1], expanded.program.path.as_os_str().as_bytes());
     }
 
     /// Kills: `shebang` accepting an `env` option word, or an assignment,

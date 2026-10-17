@@ -13,8 +13,10 @@
 //! 3. blocks reading one byte from the release pipe;
 //! 4. gives the target the signal state and descriptor limit the operator
 //!    started the run with, and closes what the supervisor took;
-//! 5. `execve`s the target, searching `PATH` itself
-//!    ([`exec_candidates`]).
+//! 5. checks every program `--from-path` pinned against what resolution
+//!    recorded ([`pin_matches`]), then `execve`s the target, searching
+//!    `PATH` itself ([`exec_candidates`]), or, for a pinned ELF program,
+//!    `execveat`s the descriptor its check opened.
 //!
 //! The blocking read is the gate: until the supervisor writes that byte, no
 //! user code has run, and if the supervisor dies instead the read returns EOF
@@ -59,6 +61,8 @@ pub(crate) mod flag {
     pub const SIGMASK: &str = "--sigmask";
     /// `--nofile-soft N`.
     pub const NOFILE_SOFT: &str = "--nofile-soft";
+    /// `--pin INDEX,fd|path,DEV,INO,SIZE,MTIME,MTIME_NSEC,CTIME,CTIME_NSEC,NLINK,MODE,UID`.
+    pub const PIN: &str = "--pin";
     /// The separator before the target's argv.
     pub const SEPARATOR: &str = "--";
 }
@@ -85,6 +89,8 @@ pub const EXIT_BRIDGE_FAILED: i32 = 121;
 /// before the release; the errno is on the error pipe. The target did not
 /// run.
 pub const EXIT_NOFILE_FAILED: i32 = 122;
+/// The most argv elements `--from-path` pins: `E`, or `X'` and `E`.
+pub const PINS_MAX: usize = 2;
 
 /// Parsed `__launch` arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,6 +129,12 @@ pub struct LaunchArgs {
     /// their targets (the pinned mount sources among them). `None` leaves
     /// the limit as inherited.
     pub nofile_soft: Option<u64>,
+    /// J12, review F5: the argv elements `--from-path` pinned, checked after
+    /// the release immediately before the exec. A pin executed by
+    /// descriptor is opened before the release (and before the narrowing
+    /// filter, so the open is not the target's), and executed with
+    /// `execveat` through that descriptor.
+    pub pins: Vec<crate::platform::ExecPin>,
     /// The target's argv; element 0 is also the program to execute.
     pub argv: Vec<OsString>,
 }
@@ -162,6 +174,9 @@ impl LaunchArgs {
         if let Some(soft) = self.nofile_soft {
             out.extend([OsString::from(flag::NOFILE_SOFT), soft.to_string().into()]);
         }
+        for pin in &self.pins {
+            out.extend([OsString::from(flag::PIN), pin_value(pin).into()]);
+        }
         out.push(OsString::from(flag::SEPARATOR));
         out.extend(self.argv.iter().cloned());
         out
@@ -200,6 +215,10 @@ pub enum LaunchUsage {
     Path(PathError),
     /// A descriptor number does not refer to an open descriptor.
     ClosedFd(&'static str, RawFd),
+    /// A `--pin` that does not parse, repeats an index, names an argv
+    /// element that is absent or not absolute, executes by descriptor
+    /// anything but argv 0, or is one too many.
+    BadPin(&'static str),
 }
 
 impl fmt::Display for LaunchUsage {
@@ -215,6 +234,7 @@ impl fmt::Display for LaunchUsage {
             Self::Missing(o) => write!(f, "{o} is required"),
             Self::Path(e) => write!(f, "{e}"),
             Self::ClosedFd(o, fd) => write!(f, "{o} {fd} is not open"),
+            Self::BadPin(why) => write!(f, "{}: {why}", flag::PIN),
         }
     }
 }
@@ -223,8 +243,8 @@ impl std::error::Error for LaunchUsage {}
 
 /// Parse `--release-fd N --error-fd M [--narrow] [--read-open-fast-path]
 /// [--trace-data-fd T] [--mediate L,S] [--bridge R] [--sigmask HEX]
-/// [--nofile-soft N] -- PROGRAM ARG...`, options in any order; [`LaunchArgs::to_argv`] writes
-/// them in this one.
+/// [--nofile-soft N] [--pin PIN]... -- PROGRAM ARG...`, options in any order;
+/// [`LaunchArgs::to_argv`] writes them in this one.
 ///
 /// # Errors
 ///
@@ -239,6 +259,7 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
     let mut bridge: Option<RawFd> = None;
     let mut sigmask: Option<u64> = None;
     let mut nofile_soft: Option<u64> = None;
+    let mut pins: Vec<crate::platform::ExecPin> = Vec::new();
     let mut index = 0usize;
     let mut argv: Option<Vec<OsString>> = None;
 
@@ -308,6 +329,13 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
                 );
                 index += 2;
             }
+            flag::PIN => {
+                let raw = args
+                    .get(index + 1)
+                    .ok_or(LaunchUsage::MissingValue(flag::PIN))?;
+                pins.push(parse_pin(raw)?);
+                index += 2;
+            }
             _ => return Err(LaunchUsage::UnknownOption(name)),
         }
     }
@@ -327,6 +355,7 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
     for part in &argv {
         cstring_from_os(part).map_err(LaunchUsage::Path)?;
     }
+    check_pins(&pins, &argv)?;
     Ok(LaunchArgs {
         release_fd: release_fd.ok_or(LaunchUsage::Missing(flag::RELEASE_FD))?,
         error_fd: error_fd.ok_or(LaunchUsage::Missing(flag::ERROR_FD))?,
@@ -337,8 +366,133 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
         bridge,
         sigmask,
         nofile_soft,
+        pins,
         argv,
     })
+}
+
+/// Review F5: the `(dev, ino)` of the program the launcher executes through
+/// a descriptor, which the observer's exec confirmation accepts as the
+/// image; `None` when the program is executed by path.
+#[must_use]
+pub fn pinned_image(pins: &[crate::platform::ExecPin]) -> Option<(u64, u64)> {
+    pins.iter()
+        .find(|pin| pin.index == 0 && pin.by_descriptor)
+        .map(|pin| pin.identity)
+}
+
+/// One `--pin` value, the exact inverse of [`parse_pin`].
+fn pin_value(pin: &crate::platform::ExecPin) -> String {
+    format!(
+        "{},{},{},{},{},{},{},{},{},{},{:o},{}",
+        pin.index,
+        if pin.by_descriptor { "fd" } else { "path" },
+        pin.identity.0,
+        pin.identity.1,
+        pin.size,
+        pin.mtime.0,
+        pin.mtime.1,
+        pin.ctime.0,
+        pin.ctime.1,
+        pin.nlink,
+        pin.mode,
+        pin.uid,
+    )
+}
+
+fn parse_pin(raw: &OsString) -> Result<crate::platform::ExecPin, LaunchUsage> {
+    let bad = || LaunchUsage::BadPin("expected INDEX,fd|path and ten numbers");
+    let text = raw.to_str().ok_or_else(bad)?;
+    let fields: Vec<&str> = text.split(',').collect();
+    let [
+        index,
+        how,
+        dev,
+        ino,
+        size,
+        mtime,
+        mtime_ns,
+        ctime,
+        ctime_ns,
+        nlink,
+        mode,
+        uid,
+    ] = fields.as_slice()
+    else {
+        return Err(bad());
+    };
+    let unsigned = |field: &str| field.parse::<u64>().map_err(|_| bad());
+    let signed = |field: &str| field.parse::<i64>().map_err(|_| bad());
+    Ok(crate::platform::ExecPin {
+        index: index.parse().map_err(|_| bad())?,
+        by_descriptor: match *how {
+            "fd" => true,
+            "path" => false,
+            _ => return Err(bad()),
+        },
+        identity: (unsigned(dev)?, unsigned(ino)?),
+        size: unsigned(size)?,
+        mtime: (signed(mtime)?, signed(mtime_ns)?),
+        ctime: (signed(ctime)?, signed(ctime_ns)?),
+        nlink: unsigned(nlink)?,
+        mode: u32::from_str_radix(mode, 8).map_err(|_| bad())?,
+        uid: uid.parse().map_err(|_| bad())?,
+    })
+}
+
+/// The pins must name distinct, absolute argv elements; only argv 0 is
+/// executed, so only it can be executed by descriptor.
+fn check_pins(pins: &[crate::platform::ExecPin], argv: &[OsString]) -> Result<(), LaunchUsage> {
+    if pins.len() > PINS_MAX {
+        return Err(LaunchUsage::BadPin("more pins than pinned executables"));
+    }
+    for (at, pin) in pins.iter().enumerate() {
+        let Some(element) = argv.get(pin.index) else {
+            return Err(LaunchUsage::BadPin(
+                "it names an argv element that is absent",
+            ));
+        };
+        if element.as_bytes().first() != Some(&b'/') {
+            return Err(LaunchUsage::BadPin(
+                "it names an argv element that is not absolute",
+            ));
+        }
+        if pin.by_descriptor && pin.index != 0 {
+            return Err(LaunchUsage::BadPin("only argv 0 is executed by descriptor"));
+        }
+        if pins[..at].iter().any(|other| other.index == pin.index) {
+            return Err(LaunchUsage::BadPin("an argv element is pinned twice"));
+        }
+    }
+    Ok(())
+}
+
+/// Review F5: whether `stat` is the object `pin` recorded, unchanged: the
+/// same `(dev, ino)`, a regular file of the same size, modification and
+/// change time (nanoseconds included), link count, permission bits and
+/// owner. The change time is the field no file owner can set: a write in
+/// place, a `chmod`, a rename onto or of the file and a new or removed name
+/// all move it. Pure: no call, no allocation.
+#[must_use]
+pub fn pin_matches(stat: &libc::stat, pin: &crate::platform::ExecPin) -> bool {
+    fn wide_u64<T: Into<u64>>(value: T) -> u64 {
+        value.into()
+    }
+    fn wide_i64<T: Into<i64>>(value: T) -> i64 {
+        value.into()
+    }
+    fn wide_u32<T: Into<u32>>(value: T) -> u32 {
+        value.into()
+    }
+    let mode = wide_u32(stat.st_mode);
+    (wide_u64(stat.st_dev), wide_u64(stat.st_ino)) == pin.identity
+        && mode & wide_u32(libc::S_IFMT) == wide_u32(libc::S_IFREG)
+        && u64::try_from(stat.st_size).ok() == Some(pin.size)
+        && (wide_i64(stat.st_mtime), wide_i64(stat.st_mtime_nsec)) == pin.mtime
+        && (wide_i64(stat.st_ctime), wide_i64(stat.st_ctime_nsec)) == pin.ctime
+        && wide_u64(stat.st_nlink) == pin.nlink
+        && mode & 0o7777 == pin.mode
+        && stat.st_uid == pin.uid
 }
 
 fn fd_pair(raw: Option<&OsString>, option: &'static str) -> Result<(RawFd, RawFd), LaunchUsage> {
@@ -379,7 +533,8 @@ fn fd_value(raw: Option<&OsString>, option: &'static str) -> Result<RawFd, Launc
 /// Everything that allocates happens before the filter is installed. After
 /// that point the only calls are `read`, `close`, `sigaction` and
 /// `sigprocmask` (with `sigemptyset` and `sigaddset` on stack data),
-/// `getrlimit` and `setrlimit`, `execve`, `faccessat`, `write` and `_exit`.
+/// `getrlimit` and `setrlimit`, `fstat` and `fstatat`, `execve` or
+/// `execveat`, `faccessat`, `write` and `_exit`.
 pub fn launch_main(args: &[OsString]) -> ! {
     let parsed = match parse(args) {
         Ok(parsed) => parsed,
@@ -473,6 +628,27 @@ pub fn launch_main(args: &[OsString]) -> ! {
             trace_data = super::tracer::filter::NARROWING_TRACE_DATA;
         }
     }
+
+    // Review F5: the descriptor a pinned ELF program is executed through.
+    // Opened once mediation and the bridge hold their agreed numbers (a
+    // descriptor opened earlier could take one of them) and before the
+    // narrowing filter, so this open is the launcher's own and never an
+    // event of the target's. `O_PATH`, since nothing is read through it, no
+    // symlink followed (the pinned path is canonical), and close-on-exec,
+    // so the target never holds it. What it opened is checked after the
+    // release; until then an error is only kept.
+    let exec_fd: Option<Result<RawFd, i32>> =
+        parsed.pins.iter().any(|pin| pin.by_descriptor).then(|| {
+            // SAFETY: `program` is a live NUL-terminated string; open takes
+            // scalars otherwise.
+            let fd = unsafe {
+                libc::open(
+                    program.as_ptr(),
+                    libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+            if fd < 0 { Err(errno()) } else { Ok(fd) }
+        });
 
     if parsed.narrow {
         // The observer's own filter, so the numbers the launcher narrows to
@@ -587,6 +763,83 @@ pub fn launch_main(args: &[OsString]) -> ! {
         unsafe { libc::close(report_fd) };
     }
 
+    // Review F5: what `--from-path` pinned is checked here, after the
+    // release and immediately before the exec, against what resolution
+    // recorded; the recheck before release covered everything up to the
+    // release. A pinned ELF program is checked through the descriptor it is
+    // then executed through, so a rename after this check cannot choose
+    // what runs; a script by its path, which the kernel and its interpreter
+    // open again. An object that cannot be reached is the exec failure the
+    // exec would have reported; a different or changed one is refused
+    // (`ESTALE`, with its own detail) and nothing is executed.
+    for pin in &parsed.pins {
+        // SAFETY: `stat` is plain stack data the calls fill.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let rc = if pin.by_descriptor {
+            match exec_fd {
+                Some(Ok(fd)) => {
+                    // SAFETY: `fd` is this process's own open descriptor and
+                    // `stat` is writable; fstat works on an `O_PATH` one.
+                    unsafe { libc::fstat(fd, &raw mut stat) }
+                }
+                Some(Err(open_errno)) => {
+                    report_exec_failure_and_exit(parsed.error_fd, open_errno, 0, EXIT_EXEC_FAILED)
+                }
+                None => report_and_exit(parsed.error_fd, libc::EINVAL, EXIT_INTERNAL),
+            }
+        } else {
+            let Some(path) = argv_c.get(pin.index) else {
+                report_and_exit(parsed.error_fd, libc::EINVAL, EXIT_INTERNAL);
+            };
+            // SAFETY: `path` is a live NUL-terminated string and `stat` is
+            // writable.
+            unsafe {
+                libc::fstatat(
+                    libc::AT_FDCWD,
+                    path.as_ptr(),
+                    &raw mut stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            }
+        };
+        if rc != 0 {
+            report_exec_failure_and_exit(parsed.error_fd, errno(), 0, EXIT_EXEC_FAILED);
+        }
+        if !pin_matches(&stat, pin) {
+            report_exec_failure_and_exit(
+                parsed.error_fd,
+                libc::ESTALE,
+                DETAIL_PROGRAM_CHANGED,
+                EXIT_EXEC_FAILED,
+            );
+        }
+    }
+    if let Some(Ok(fd)) = exec_fd {
+        // SAFETY: `fd` is an open descriptor, the empty path and
+        // `argv_ptrs` are a NUL-terminated string and a NULL-terminated
+        // pointer array, all live for the call, and `environ` is this
+        // process's own. execveat only returns on failure.
+        unsafe {
+            libc::syscall(
+                libc::SYS_execveat,
+                fd,
+                c"".as_ptr(),
+                argv_ptrs.as_ptr(),
+                environ(),
+                libc::AT_EMPTY_PATH,
+            )
+        };
+        let errno = errno();
+        // X04: the descriptor holds a file that exists, so ENOENT names
+        // what its ELF header asks for: its loader.
+        let detail = if errno == libc::ENOENT {
+            DETAIL_INTERPRETER_MISSING
+        } else {
+            0
+        };
+        report_exec_failure_and_exit(parsed.error_fd, errno, detail, EXIT_EXEC_FAILED);
+    }
+
     // `execve`, never `execvp`. On `ENOEXEC` the library call re-executes the
     // file through `/bin/sh`, so a file that is neither ELF nor a script with
     // a shebang would run as a shell script nobody asked for, and the receipt
@@ -630,6 +883,10 @@ pub fn launch_main(args: &[OsString]) -> ! {
 /// The launcher's detail code for an `ENOENT` from a file that exists: what
 /// is missing is the interpreter its `#!` line names, or its ELF loader.
 pub const DETAIL_INTERPRETER_MISSING: u32 = 1;
+/// Review F5: the launcher's detail code, beside `ESTALE`, for a pinned
+/// program that is not the object resolution recorded when it was checked
+/// after the release. Nothing was executed.
+pub const DETAIL_PROGRAM_CHANGED: u32 = 2;
 
 /// Whether `path` names an existing object. Async-signal-safe: one
 /// `faccessat` on a string built before the fork-free no-allocation point.
@@ -647,6 +904,9 @@ pub struct ExecFailure {
     /// The file named exists, and `errno` is `ENOENT`: its interpreter or
     /// loader is what was not found.
     pub interpreter_missing: bool,
+    /// Review F5: `errno` is `ESTALE` because a pinned program changed, and
+    /// the launcher refused to execute it.
+    pub program_changed: bool,
 }
 
 impl ExecFailure {
@@ -660,6 +920,9 @@ impl ExecFailure {
     /// the launcher knows.
     #[must_use]
     pub fn detail(&self) -> Option<crate::platform::ExecFailureDetail> {
+        if self.program_changed {
+            return Some(crate::platform::ExecFailureDetail::ProgramChanged);
+        }
         self.interpreter_missing
             .then_some(crate::platform::ExecFailureDetail::InterpreterMissing)
     }
@@ -679,6 +942,9 @@ pub fn decode_exec_failure(bytes: &[u8]) -> Option<ExecFailure> {
         interpreter_missing: errno == libc::ENOENT
             && bytes.len() == 8
             && detail == Some(DETAIL_INTERPRETER_MISSING),
+        program_changed: errno == libc::ESTALE
+            && bytes.len() == 8
+            && detail == Some(DETAIL_PROGRAM_CHANGED),
     })
 }
 
@@ -1020,6 +1286,7 @@ mod tests {
             bridge: None,
             sigmask: None,
             nofile_soft: None,
+            pins: Vec::new(),
             argv: osv(&["/bin/sh", "-c", "echo --narrow"]),
         };
         let full = LaunchArgs {
@@ -1053,6 +1320,175 @@ mod tests {
         let line = full.command_line(OsStr::new("/run/ukai/jail"));
         assert_eq!(line[..2], osv(&["/run/ukai/jail", SUBCOMMAND]));
         assert_eq!(parse(&line[2..]), Ok(full));
+    }
+
+    fn pin(index: usize, by_descriptor: bool) -> crate::platform::ExecPin {
+        crate::platform::ExecPin {
+            index,
+            by_descriptor,
+            identity: (2049, 1_234_567),
+            size: 4096,
+            mtime: (1_700_000_000, 999_999_999),
+            ctime: (-1, 0),
+            nlink: 1,
+            mode: 0o4755,
+            uid: 1000,
+        }
+    }
+
+    /// Review F5: `--pin` round-trips every field, an expansion's two pins
+    /// included.
+    #[test]
+    fn pins_are_written_and_parsed_back_exactly() {
+        let args = LaunchArgs {
+            release_fd: 3,
+            error_fd: 4,
+            narrow: true,
+            read_open_fast_path: false,
+            trace_data_fd: None,
+            mediate: None,
+            bridge: None,
+            sigmask: None,
+            nofile_soft: None,
+            pins: vec![pin(0, true), pin(1, false)],
+            argv: osv(&["/opt/rt/node", "/opt/agent/bin/agent", "-p"]),
+        };
+        let written = args.to_argv();
+        assert!(
+            written.windows(2).any(|pair| pair[0] == "--pin"
+                && pair[1] == "0,fd,2049,1234567,4096,1700000000,999999999,-1,0,1,4755,1000"),
+            "{written:?}"
+        );
+        assert_eq!(parse(&written), Ok(args));
+        assert_eq!(
+            pinned_image(&[pin(1, false), pin(0, true)]),
+            Some((2049, 1_234_567))
+        );
+        assert_eq!(pinned_image(&[pin(0, false)]), None);
+        assert_eq!(pinned_image(&[]), None);
+    }
+
+    /// Review F5: a pin the launcher cannot act on is a usage error, never
+    /// ignored.
+    #[test]
+    fn a_bad_pin_is_a_usage_error() {
+        let with = |pins: &[crate::platform::ExecPin], argv: &[&str]| {
+            parse(
+                &LaunchArgs {
+                    release_fd: 3,
+                    error_fd: 4,
+                    narrow: false,
+                    read_open_fast_path: false,
+                    trace_data_fd: None,
+                    mediate: None,
+                    bridge: None,
+                    sigmask: None,
+                    nofile_soft: None,
+                    pins: pins.to_vec(),
+                    argv: osv(argv),
+                }
+                .to_argv(),
+            )
+        };
+        assert!(with(&[pin(0, true)], &["/bin/true"]).is_ok());
+        assert!(with(&[pin(0, false), pin(1, false)], &["/bin/sh", "/x/s"]).is_ok());
+        for (pins, argv) in [
+            (vec![pin(1, false)], vec!["/bin/true"]),
+            (vec![pin(0, true)], vec!["true"]),
+            (vec![pin(1, false)], vec!["/bin/sh", "s"]),
+            (vec![pin(1, true)], vec!["/bin/sh", "/x/s"]),
+            (vec![pin(0, true), pin(0, false)], vec!["/bin/sh"]),
+            (
+                vec![pin(0, true), pin(1, false), pin(2, false)],
+                vec!["/a", "/b", "/c"],
+            ),
+        ] {
+            assert!(
+                matches!(with(&pins, &argv), Err(LaunchUsage::BadPin(_))),
+                "{pins:?} {argv:?}"
+            );
+        }
+        for bad in [
+            "0,fd,1,2,3,4,5,6,7,8,755",
+            "0,fd,1,2,3,4,5,6,7,8,755,0,9",
+            "0,exec,1,2,3,4,5,6,7,8,755,0",
+            "0,fd,-1,2,3,4,5,6,7,8,755,0",
+            "0,fd,1,2,3,4,5,6,7,8,758,0",
+            "x,fd,1,2,3,4,5,6,7,8,755,0",
+            "",
+        ] {
+            assert!(
+                matches!(
+                    parse(&osv(&[
+                        "--release-fd",
+                        "3",
+                        "--error-fd",
+                        "4",
+                        "--pin",
+                        bad,
+                        "--",
+                        "/x"
+                    ])),
+                    Err(LaunchUsage::BadPin(_))
+                ),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            parse(&osv(&["--release-fd", "3", "--error-fd", "4", "--pin"])),
+            Err(LaunchUsage::MissingValue("--pin"))
+        );
+    }
+
+    /// Review F5: the pin matches only the object it recorded, unchanged:
+    /// each field on its own decides.
+    #[test]
+    fn a_pin_matches_only_its_own_unchanged_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("program");
+        std::fs::write(&file, b"\x7fELF").unwrap();
+        let c_file = CString::new(file.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a live path and a writable stack buffer.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::stat(c_file.as_ptr(), &raw mut stat) }, 0);
+        let recorded = crate::state::anchored::fstat(std::os::fd::AsFd::as_fd(
+            &std::fs::File::open(&file).unwrap(),
+        ))
+        .unwrap();
+        let exact = crate::platform::ExecPin {
+            index: 0,
+            by_descriptor: true,
+            identity: recorded.identity(),
+            size: recorded.size,
+            mtime: recorded.mtime,
+            ctime: recorded.ctime,
+            nlink: recorded.nlink,
+            mode: recorded.mode,
+            uid: recorded.uid,
+        };
+        assert!(pin_matches(&stat, &exact));
+        type Edit = fn(&mut crate::platform::ExecPin);
+        let edits: [(&str, Edit); 10] = [
+            ("dev", |p| p.identity.0 += 1),
+            ("ino", |p| p.identity.1 += 1),
+            ("size", |p| p.size += 1),
+            ("mtime", |p| p.mtime.0 += 1),
+            ("mtime ns", |p| p.mtime.1 += 1),
+            ("ctime", |p| p.ctime.0 += 1),
+            ("ctime ns", |p| p.ctime.1 += 1),
+            ("nlink", |p| p.nlink += 1),
+            ("mode", |p| p.mode ^= 0o100),
+            ("uid", |p| p.uid += 1),
+        ];
+        for (what, edit) in edits {
+            let mut changed = exact;
+            edit(&mut changed);
+            assert!(!pin_matches(&stat, &changed), "{what}");
+        }
+        // A directory with every recorded field is still not the program.
+        let mut directory = stat;
+        directory.st_mode = (directory.st_mode & 0o7777) | libc::S_IFDIR;
+        assert!(!pin_matches(&directory, &exact));
     }
 
     #[test]
@@ -1275,6 +1711,32 @@ mod tests {
                 .interpreter_missing
         );
         assert!(!report(libc::ENOENT, Some(7)).unwrap().interpreter_missing);
+        assert!(
+            !report(libc::ENOENT, Some(DETAIL_PROGRAM_CHANGED))
+                .unwrap()
+                .interpreter_missing
+        );
+
+        // Review F5: a changed program is ESTALE with its own detail, and
+        // only that pair.
+        let changed = report(libc::ESTALE, Some(DETAIL_PROGRAM_CHANGED)).unwrap();
+        assert_eq!(changed.errno_name(), "ESTALE");
+        assert!(changed.program_changed && !changed.interpreter_missing);
+        assert_eq!(
+            changed.detail(),
+            Some(crate::platform::ExecFailureDetail::ProgramChanged)
+        );
+        assert!(!report(libc::ESTALE, None).unwrap().program_changed);
+        assert!(
+            !report(libc::ESTALE, Some(DETAIL_INTERPRETER_MISSING))
+                .unwrap()
+                .program_changed
+        );
+        assert!(
+            !report(libc::EACCES, Some(DETAIL_PROGRAM_CHANGED))
+                .unwrap()
+                .program_changed
+        );
         let mut long = libc::ENOENT.to_le_bytes().to_vec();
         long.extend_from_slice(&DETAIL_INTERPRETER_MISSING.to_le_bytes());
         long.push(0);

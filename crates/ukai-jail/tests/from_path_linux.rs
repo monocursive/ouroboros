@@ -704,3 +704,204 @@ fn k43_k44_the_program_bound_credential_reaches_only_the_program_until_removed()
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Review F5: the window between the recheck before release and the exec
+// ---------------------------------------------------------------------------
+
+/// What a test does to the program in the window the swap seam opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Change {
+    /// Nothing: the seam alone must not change the run.
+    Untouched,
+    /// Another file is renamed over the program in its install root.
+    RenamedOver,
+    /// The program is written in place, the same inode.
+    WrittenInPlace,
+}
+
+/// Runs `NAME ARG...` from the repository with the swap seam
+/// (`UKAI_JAIL_TEST_PROGRAM_SWAP`) holding the supervisor after its recheck
+/// before release, applies `change` to the program there, and lets the run
+/// go on. The replacement a rename brings would write `swapped-ran` into
+/// the repository and print `swapped`.
+fn run_with_change(live: &Live, name: &str, args: &[&OsStr], change: Change) -> Output {
+    let seam = live.root.join(format!("seam-{name}-{change:?}"));
+    mkdir(&seam, 0o700);
+    let program = live.bin.join(name);
+    let mut argv = vec![os(name)];
+    argv.extend_from_slice(args);
+    let mut child = live
+        .command(&live.repo, &argv)
+        .env(ukai_jail::program::SWAP_SEAM, &seam)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ended = false;
+    common::eventually(
+        "the supervisor past its recheck before release",
+        Duration::from_secs(60),
+        || {
+            ended = child.try_wait().unwrap().is_some();
+            ended || seam.join("rechecked").exists()
+        },
+    );
+    if ended {
+        let output = child.wait_with_output().unwrap();
+        panic!(
+            "{name} {change:?}: the run ended before the seam: {}",
+            report(&output)
+        );
+    }
+    match change {
+        Change::Untouched => {}
+        Change::RenamedOver => {
+            let replacement = live.bin.join(format!(".{name}.new"));
+            write(
+                &replacement,
+                format!(
+                    "#!/bin/sh\necho swapped > {}\necho swapped\n",
+                    live.repo.join("swapped-ran").display()
+                )
+                .as_bytes(),
+                0o755,
+            );
+            std::fs::rename(&replacement, &program).unwrap();
+        }
+        Change::WrittenInPlace => {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&program)
+                .unwrap();
+            file.write_all(b"\0").unwrap();
+        }
+    }
+    write(&seam.join("go"), b"", 0o600);
+    child.wait_with_output().unwrap()
+}
+
+/// A changed program's refusal: exit 125, nothing printed, nothing run, and
+/// a refused receipt whose exec error is `ESTALE`, `policy_widening` at
+/// `--from-path`, with the seam recorded.
+fn assert_refused_as_changed(live: &Live, output: &Output, label: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "{label}: {}",
+        report(output)
+    );
+    assert!(output.stdout.is_empty(), "{label}: {}", report(output));
+    assert!(
+        !live.repo.join("swapped-ran").exists(),
+        "{label}: the replacement ran"
+    );
+    let receipt = live.receipt();
+    assert_eq!(receipt["phase"], "refused", "{label}: {receipt:#}");
+    let outcome = &receipt["outcome"];
+    assert_eq!(outcome["kind"], "exec_error", "{label}: {outcome:#}");
+    assert_eq!(outcome["cause"], "ESTALE", "{label}: {outcome:#}");
+    assert_eq!(
+        outcome["error"]["code"], "policy_widening",
+        "{label}: {outcome:#}"
+    );
+    assert_eq!(
+        outcome["error"]["key_path"], "--from-path",
+        "{label}: {outcome:#}"
+    );
+    assert!(
+        outcome["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("changed between the recheck before release")),
+        "{label}: {outcome:#}"
+    );
+    assert_eq!(
+        receipt["lifetime"]["native"]["details"]["test_seams"][ukai_jail::program::SWAP_SEAM],
+        live.root.join(format!("seam-{label}")).to_str().unwrap(),
+        "{label}: {receipt:#}"
+    );
+}
+
+/// The ELF program a test pins: a copy of the host's `/bin/sh`. Not
+/// `echo`: on the reference host that is uutils' multi-call binary, which
+/// names itself from `AT_EXECFN` and refuses any other name.
+fn elf_shell(live: &Live, name: &str) {
+    let shell = Path::new("/bin/sh").canonicalize().unwrap();
+    std::fs::copy(&shell, live.bin.join(name)).unwrap();
+    std::fs::set_permissions(live.bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        &std::fs::read(live.bin.join(name)).unwrap()[..4],
+        b"\x7fELF"
+    );
+}
+
+/// Review F5: an ELF program renamed over, or written in place, after the
+/// supervisor's recheck before release is refused by the launcher's own
+/// check, under `tool` and `agent` (`--from-path` refuses `none`): neither
+/// the pinned file nor the replacement runs. Untouched, the same seam runs
+/// the pinned file, through the descriptor the launcher checked: the
+/// target's exec is an `execveat` and the observer confirms it.
+#[test]
+fn f5_an_elf_program_changed_after_the_recheck_is_refused_not_run() {
+    if !common::live() {
+        return;
+    }
+    for jail in ["tool", "agent"] {
+        for change in [
+            Change::Untouched,
+            Change::RenamedOver,
+            Change::WrittenInPlace,
+        ] {
+            let label = format!("{jail} {change:?}");
+            let live = Live::new();
+            let name = format!("f5{jail}");
+            live.profile(&name, &format!("name = \"{name}\"\njail = \"{jail}\"\n"));
+            elf_shell(&live, &name);
+            let output = run_with_change(&live, &name, &[os("-c"), os("echo pinned-ran")], change);
+            if change == Change::Untouched {
+                assert_eq!(
+                    output.status.code(),
+                    Some(0),
+                    "{label}: {}",
+                    report(&output)
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout),
+                    "pinned-ran\n",
+                    "{label}"
+                );
+                let receipt = live.receipt();
+                assert_eq!(receipt["phase"], "settled", "{label}: {receipt:#}");
+                // Observation is on by default: the observer confirmed the
+                // exec, and the call it witnessed is the descriptor's.
+                assert_eq!(receipt["exec_observed"], true, "{label}: {receipt:#}");
+                let journal = live.journal();
+                let first = journal
+                    .iter()
+                    .find(|event| event["operation"] == "proc.exec")
+                    .unwrap_or_else(|| panic!("{label}: no exec in {journal:#?}"));
+                assert_eq!(first["fields"]["syscall"], "execveat", "{label}: {first:#}");
+            } else {
+                assert_refused_as_changed(&live, &output, &format!("{name}-{change:?}"));
+            }
+        }
+    }
+}
+
+/// Review F5: a `#!` script renamed over after the recheck is refused by the
+/// launcher's check by path, the last thing before the exec.
+#[test]
+fn f5_a_script_renamed_over_after_the_recheck_is_refused_not_run() {
+    if !common::live() {
+        return;
+    }
+    let live = Live::new();
+    live.profile("f5script", "name = \"f5script\"\njail = \"tool\"\n");
+    write(
+        &live.bin.join("f5script"),
+        b"#!/bin/sh\necho pinned-ran\n",
+        0o755,
+    );
+    let output = run_with_change(&live, "f5script", &[], Change::RenamedOver);
+    assert_refused_as_changed(&live, &output, "f5script-RenamedOver");
+}

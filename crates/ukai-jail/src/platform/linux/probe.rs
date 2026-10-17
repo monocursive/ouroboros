@@ -1442,6 +1442,7 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
             bridge: None,
             sigmask: None,
             nofile_soft: None,
+            pins: Vec::new(),
             argv: vec![
                 jail_exe.into(),
                 INSIDE_SUBCOMMAND.into(),

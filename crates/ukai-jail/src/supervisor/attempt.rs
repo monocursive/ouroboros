@@ -290,6 +290,14 @@ impl<'a> Attempt<'a> {
                         handle: std::sync::Arc::clone(&root.handle),
                     })
                     .collect(),
+                // Review F5: what the launcher checks immediately before
+                // it executes.
+                exec_pins: self
+                    .plan
+                    .program
+                    .as_ref()
+                    .map(crate::program::Program::exec_pins)
+                    .unwrap_or_default(),
             },
             Sinks {
                 trace: Some(Arc::clone(&self.journal.trace)),
@@ -418,6 +426,9 @@ impl<'a> Attempt<'a> {
             program
                 .recheck()
                 .map_err(|error| error.in_stage(ErrorStage::Prepared))?;
+            // Review F5: a deterministic window after the recheck, so the
+            // launcher's own check is proved through the CLI.
+            crate::program::swap_rendezvous();
         }
         Ok(())
     }
@@ -823,7 +834,7 @@ impl<'a> Attempt<'a> {
         // X04: the errno stays in `cause`; a missing interpreter, which the
         // kernel reports as ENOENT like a missing program, takes its own code
         // so the two differ in a machine field.
-        let error = JailError::new(
+        let mut error = JailError::new(
             detail.map_or(
                 ErrorCode::ExecFailed,
                 crate::platform::ExecFailureDetail::error_code,
@@ -838,6 +849,11 @@ impl<'a> Attempt<'a> {
                 None => format!("the target exec failed with {errno}"),
             },
         );
+        // Review F5: the launcher's own identity check names the key the
+        // recheck before release names.
+        if detail == Some(crate::platform::ExecFailureDetail::ProgramChanged) {
+            error = error.with_key_path(crate::program::KEY);
+        }
         // A receipt still with the worker lands (or is given up on) before
         // the refused one.
         if let Some(failure) = settle_in_flight(

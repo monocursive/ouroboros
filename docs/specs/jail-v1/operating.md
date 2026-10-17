@@ -541,11 +541,29 @@ With `--from-path` (which the alias implies):
 - **Before release** the program is walked to again under the install root's
   own handle and by its path; a file swapped, written, or given another name
   since resolution refuses (`policy_widening`, "identity mismatch") and
-  nothing runs. What remains is the interval between that check and the
-  launcher's `execve`: a process running as you that renames another file
-  into the install root then wins, and the child runs that file, still
-  contained and without a `@program` credential (the vault pins the file's
-  identity, size and times).
+  nothing runs. **After release**, as the last thing before the exec, the
+  launcher checks it once more against what resolution recorded (identity,
+  size, times, link count, owner, mode). An ELF program is checked through a
+  descriptor the launcher opened and executed through that descriptor
+  (`execveat`), so a file renamed into the install root afterwards is never
+  the one that runs; a change is refused as an exec error (`outcome.cause`
+  `ESTALE`, `policy_widening` at `--from-path`, exit 125) and nothing runs.
+  What remains: an ELF program written in place by a process running as you
+  whose open, write and close all fall between the launcher's last check and
+  the exec (two consecutive calls; a writer already holding it open makes
+  the exec fail with `ETXTBSY`), and a `#!` script, which the kernel and its
+  interpreter open again by name: it is checked by path immediately before
+  the exec, and a rename in between still wins. Either way the file runs
+  contained. A program written in place holds no `@program` credential (the
+  vault pins the file's identity, size and times), nor does a script a
+  system interpreter runs; after an `env` expansion the credential is bound
+  to the interpreter, which already admits any script it runs. The audit
+  records a pinned ELF program's exec as `execveat` with an empty path and
+  its descriptor. The program sees `/dev/fd/N` as its `AT_EXECFN` (its
+  argv 0 and `/proc/self/exe` are its path): one that names itself from
+  `AT_EXECFN`, as uutils' multi-call coreutils does, fails under
+  `--from-path`; on older kernels `ps` may show the descriptor number as its
+  name.
 - **Disclosure**: `explain --from-path` prints the program, its argv and every
   derived root (`--json` adds a `program` object), the provenance names
   `program-resolution`, and when stderr is a terminal one line precedes exec:

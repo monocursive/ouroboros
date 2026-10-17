@@ -1238,6 +1238,7 @@ fn the_boundary_itself_refuses_a_restriction_it_would_not_apply() {
             launch: None,
             proxy: None,
             pinned_roots: Vec::new(),
+            exec_pins: Vec::new(),
             prepare_deadline: ukai_jail::platform::ContinuousDeadline::after(Duration::from_secs(
                 10,
             )),

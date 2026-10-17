@@ -105,6 +105,9 @@ pub(super) struct Launched {
     /// program name and `PATH` the launcher itself uses. The observer's exec
     /// snapshot must be one of them.
     pub(super) target_images: Vec<Vec<u8>>,
+    /// Review F5: the `(dev, ino)` of a pinned ELF program the launcher
+    /// executes through a descriptor.
+    pub(super) pinned_image: Option<(u64, u64)>,
     /// The write end of the release pipe the launcher blocks reading.
     pub(super) release: OwnedFd,
     /// The read end of the launcher's error pipe.
@@ -123,6 +126,7 @@ pub(super) struct RunState {
     /// The launcher: the target once it execs.
     pub(super) launcher: ProcessIdentity,
     pub(super) target_images: Vec<Vec<u8>>,
+    pub(super) pinned_image: Option<(u64, u64)>,
     /// `None` once the release byte is written: a second release is
     /// impossible (X03).
     release: Option<OwnedFd>,
@@ -166,6 +170,7 @@ impl RunState {
         RunState {
             launcher: launched.launcher,
             target_images: launched.target_images,
+            pinned_image: launched.pinned_image,
             release: Some(launched.release),
             error: launched.error,
             audit: launched.audit,
@@ -196,6 +201,7 @@ impl RunState {
         let target = observed::Target {
             launcher: self.launcher.pid,
             images: &self.target_images,
+            pinned: self.pinned_image,
         };
         match observed::record(&mut self.audit, &target, event) {
             Fact::CommandForbidden(pattern) => {
@@ -244,6 +250,7 @@ impl RunState {
         let target = observed::Target {
             launcher: self.launcher.pid,
             images: &self.target_images,
+            pinned: self.pinned_image,
         };
         let (exit_seen, finished) = (&mut self.target_exit_seen, &mut self.finished);
         let summary = observed::stop(
@@ -925,6 +932,7 @@ mod tests {
         RunState::new(Launched {
             launcher: ProcessIdentity::own().unwrap(),
             target_images: Vec::new(),
+            pinned_image: None,
             release,
             error: ErrorPipe::new(error),
             audit: AuditWriter::new(

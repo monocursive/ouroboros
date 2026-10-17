@@ -839,12 +839,54 @@ the code is stricter than §3 the text above still describes the intent.
     program in place. A root-owned file with several names is accepted (a
     non-root operator's agent cannot write it). The recheck before release
     also compares size, modification and change times and the link count.
-20. **The window §3.3 step 3 leaves.** "A swap between resolution and exec
-    refuses" holds up to the recheck before release; between it and the
-    launcher's `execve` by path, a process running as the operator can rename
-    another file into the install root, and the child runs it, contained and
-    without a `@program` credential (review F5). Executing through the held
-    handle would close it for ELF programs; it is not done here.
+20. **The window §3.3 step 3 leaves, closed for ELF programs** (review F5).
+    The recheck before release covers resolution up to the release. After
+    the release, as the last thing before the exec, the launcher checks every
+    pinned executable again against what resolution recorded: `(dev, ino)`,
+    size, modification and change times, link count, owner and mode (its
+    `--pin` options). An ELF file at argv 0 (`E`, or `X'` after an
+    expansion) is opened `O_PATH` by the launcher before the release, checked
+    through that descriptor with `fstat`, and executed through it with
+    `execveat(fd, "", AT_EMPTY_PATH)`, so no rename after the check can
+    choose what runs; the link count and the change time (which no owner
+    can set) catch a file renamed over it, given another name, written in
+    place or `chmod`ed since resolution. A changed program is refused after
+    the release as an exec error, `outcome.cause` `ESTALE` and
+    `outcome.error.code` `policy_widening` at `--from-path` (exit 125), and
+    nothing is executed; a pinned file the launcher cannot reach is the exec
+    failure an exec by path would have reported. Proved through the CLI
+    under `tool` and `agent` (`--from-path` refuses `none`) by a test seam
+    (`UKAI_JAIL_TEST_PROGRAM_SWAP`) that holds the supervisor after its
+    recheck while the test renames another file over the program or writes
+    it in place (`from_path_linux.rs`, `f5_*`), and on the launcher directly
+    (`linux_mechanisms.rs`). What remains:
+    - an ELF program written in place by an open, write and close that all
+      fall between the launcher's `fstat` and the kernel's refusal of
+      writers inside `execveat` (two consecutive calls of the launcher). A
+      writer that already holds the file open makes the exec fail with
+      `ETXTBSY`, and no writer can open it while it runs (both observed on
+      the reference host's kernel);
+    - a `#!` script (`E` run by a system interpreter, or `E` after an
+      expansion): the kernel and then the interpreter open it again by its
+      path, so it is checked by path immediately before the exec, and a
+      rename between that check and those opens still wins. The replacement
+      runs contained; a system-interpreter script carries no `@program`
+      credential (item 2), and after an expansion the credential is bound to
+      `X'`, which already admits any script it runs (§3.3 step 7).
+
+    The exec of a pinned ELF program is recorded as the call it is: the
+    audit's `proc.exec` names `execveat` with an empty path
+    (`{kind: unavailable, reason: empty_path}`) and `path_dirfd`. The
+    observer confirms it by the kernel's image being the pinned inode, which
+    holds even when a rename has given the program's path another file
+    since. The program can tell: its `AT_EXECFN` is `/dev/fd/N`, not its
+    path (argv 0 and `/proc/self/exe` are unchanged; `linux_mechanisms.rs`
+    shows it under `LD_SHOW_AUXV`). A program that names itself from
+    `AT_EXECFN` sees a descriptor number: on the reference host uutils'
+    multi-call coreutils then refuses to run ("unknown program '4'"). There
+    `/proc/PID/comm` is the file's name (kernel 7.0); older kernels are
+    reported to name a process executed this way after the descriptor
+    number (not checked here).
 21. **The home refusal also compares identities** (review F4): a workspace or
     install root that is the home, `/` or an ancestor of the home by
     `(dev, ino)` refuses, so a bind-mount alias of the home does too.

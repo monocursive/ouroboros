@@ -155,6 +155,11 @@ pub struct Target<'a> {
     /// The paths the launcher will try to `execve`, derived from the same
     /// program name and `PATH` it uses itself.
     pub images: &'a [Vec<u8>],
+    /// Review F5: the `(dev, ino)` of a pinned ELF program, which the
+    /// launcher executes through the descriptor it checked rather than by
+    /// path. The kernel's image being that inode confirms the exec, whatever
+    /// the program's path names by the time of the stop.
+    pub pinned: Option<(u64, u64)>,
 }
 
 /// What one event establishes beyond its audit record.
@@ -353,6 +358,12 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
             // second, the deleted-suffix form only when no live candidate
             // contradicts.
             if let Some(kernel) = kernel_image.as_ref() {
+                // Review F5: the image of an exec through the pinned
+                // descriptor is that inode, so its identity confirms it
+                // even once a rename has given the path another file.
+                if target.pinned.is_some() && kernel.identity == target.pinned {
+                    return Fact::TargetExec;
+                }
                 if kernel_confirms(target.images, kernel)
                     || script_kernel_confirms(
                         target.images,
@@ -641,6 +652,7 @@ mod tests {
         let target = Target {
             launcher: LAUNCHER,
             images: &images,
+            pinned: None,
         };
         let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
         for (event, expected) in [
@@ -674,6 +686,7 @@ mod tests {
         let target = Target {
             launcher: LAUNCHER,
             images: &images,
+            pinned: None,
         };
         let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
         let fact = record(
@@ -754,6 +767,7 @@ mod tests {
         let target = Target {
             launcher: LAUNCHER,
             images: &images,
+            pinned: None,
         };
         let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
         // Kernel and snapshot agree on the target.
@@ -811,6 +825,74 @@ mod tests {
         assert!(!quiet.has_gaps(), "a non-target image is not a mismatch");
     }
 
+    /// Review F5: a pinned ELF program is executed through the descriptor the
+    /// launcher checked, with an empty pathname. The kernel's image being the
+    /// pinned inode confirms it, even once a rename gave the program's path a
+    /// different file (the candidate's identity at the stop disagrees, and
+    /// the link carries the kernel's ` (deleted)`); another inode does not,
+    /// and the empty snapshot names nothing, so it is no mismatch either.
+    #[test]
+    fn the_pinned_inode_confirms_an_exec_through_its_descriptor() {
+        let images = images();
+        let pinned = (7, 70);
+        let target = Target {
+            launcher: LAUNCHER,
+            images: &images,
+            pinned: Some(pinned),
+        };
+        let renamed_over = |identity| {
+            Some(KernelImage {
+                path: b"/usr/bin/target (deleted)".to_vec(),
+                identity: Some(identity),
+                candidates: vec![super::super::tracer::CandidateImage {
+                    path: b"/usr/bin/target".to_vec(),
+                    identity: Some((7, 71)),
+                }],
+            })
+        };
+        let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_kernel(LAUNCHER, snapshot(b"", true), renamed_over(pinned)),
+            ),
+            Fact::TargetExec
+        );
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_kernel(LAUNCHER, snapshot(b"", true), renamed_over((7, 72))),
+            ),
+            Fact::Nothing
+        );
+        // Without a pin the same stop does not confirm: the rename is what
+        // the candidates show.
+        let unpinned = Target {
+            pinned: None,
+            ..target
+        };
+        assert_eq!(
+            record(
+                &mut audit,
+                &unpinned,
+                &exec_with_kernel(LAUNCHER, snapshot(b"", true), renamed_over(pinned)),
+            ),
+            Fact::Nothing
+        );
+        // Another process's exec of the pinned inode is not the target's.
+        assert_eq!(
+            record(
+                &mut audit,
+                &target,
+                &exec_with_kernel(LAUNCHER + 1, snapshot(b"", true), renamed_over(pinned)),
+            ),
+            Fact::Nothing
+        );
+        assert!(!audit.has_gaps());
+    }
+
     /// A `#!` target loads the interpreter its script names, so the kernel
     /// image is not one of the target's spellings. The exec still confirms when
     /// the kernel's own records show that rewrite: the interpreter is the
@@ -823,6 +905,7 @@ mod tests {
         let target = Target {
             launcher: LAUNCHER,
             images: &images,
+            pinned: None,
         };
         let shebangs = vec![Some(ShebangImage {
             interpreter: b"/bin/sh".to_vec(),
@@ -865,6 +948,7 @@ mod tests {
         let target = Target {
             launcher: LAUNCHER,
             images: &images,
+            pinned: None,
         };
         let shebangs = vec![Some(ShebangImage {
             interpreter: b"/usr/bin/env".to_vec(),
@@ -900,6 +984,7 @@ mod tests {
         let target = Target {
             launcher: LAUNCHER,
             images: &images,
+            pinned: None,
         };
         let shebang = ShebangImage {
             interpreter: b"/bin/sh".to_vec(),
@@ -946,6 +1031,7 @@ mod tests {
         let target = Target {
             launcher: LAUNCHER,
             images: &images,
+            pinned: None,
         };
         let shebangs = vec![Some(ShebangImage {
             interpreter: b"/bin/sh".to_vec(),
@@ -1021,6 +1107,7 @@ mod tests {
         let target = Target {
             launcher: LAUNCHER,
             images: &images,
+            pinned: None,
         };
         let raw = |path: &std::path::Path| {
             use std::os::unix::ffi::OsStrExt as _;
@@ -1120,6 +1207,7 @@ mod tests {
         let target = Target {
             launcher: LAUNCHER,
             images: &images,
+            pinned: None,
         };
         let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
         let exit = |pid| TracerEvent::Exit {
@@ -1320,6 +1408,7 @@ mod tests {
         let target = Target {
             launcher: LAUNCHER,
             images: &images,
+            pinned: None,
         };
         for op in [
             ClosedOp::Open,
@@ -1389,6 +1478,7 @@ mod tests {
         let target = Target {
             launcher: LAUNCHER,
             images: &images,
+            pinned: None,
         };
         let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
         record(
@@ -1435,6 +1525,7 @@ mod tests {
         let target = Target {
             launcher: LAUNCHER,
             images: &images,
+            pinned: None,
         };
         let file = tempfile::NamedTempFile::new().unwrap();
         let trace = crate::trace::shared(crate::trace::FileSink::new(file.reopen().unwrap()));
@@ -1491,6 +1582,7 @@ mod tests {
         let target = Target {
             launcher: LAUNCHER,
             images: &images,
+            pinned: None,
         };
         let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
         assert_eq!(

@@ -431,6 +431,7 @@ fn become_subreaper() -> Result<(), JailError> {
 fn spawn_launcher(
     exe: &Path,
     argv: &[OsString],
+    pins: &[crate::platform::ExecPin],
     env: &[(OsString, OsString)],
     workspace: &Path,
     observe_on: bool,
@@ -465,6 +466,8 @@ fn spawn_launcher(
                 // descriptors on (`exec::FdMap`); the target gets the
                 // operator's back.
                 nofile_soft: exec::operator_nofile_soft(),
+                // Review F5: checked immediately before the exec.
+                pins: pins.to_vec(),
                 argv: argv.to_vec(),
             }
             .to_argv(),
@@ -626,7 +629,7 @@ impl Uncontained {
 
         // J12 §3.2 step 4: the child starts where the snapshot says.
         let start = super::mounts::join_native(&plan.workspace, &snapshot.roots.cwd);
-        let spawned = spawn_launcher(&exe, &argv, &env, &start, observe_on)?;
+        let spawned = spawn_launcher(&exe, &argv, &plan.exec_pins, &env, &start, observe_on)?;
         let audit = AuditWriter::new(
             &plan.attempt_id,
             sinks.trace.clone(),
@@ -660,6 +663,7 @@ impl Uncontained {
         let state = RunState::new(Launched {
             launcher: established.launcher,
             target_images,
+            pinned_image: super::launch::pinned_image(&plan.exec_pins),
             release: spawned.release,
             error: ErrorPipe::new(spawned.error),
             audit,
@@ -1665,6 +1669,7 @@ mod tests {
                 start_time_ticks: 0,
             },
             target_images: Vec::new(),
+            pinned_image: None,
             release,
             error: ErrorPipe::new(error),
             audit: AuditWriter::new(

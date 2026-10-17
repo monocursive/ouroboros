@@ -146,6 +146,7 @@ mod tests {
                 launch: None,
                 proxy: None,
                 pinned_roots: Vec::new(),
+                exec_pins: Vec::new(),
             },
             Sinks { trace: None },
         );

@@ -1012,6 +1012,7 @@ fn j4_n7_a_failed_leaf_registration_refuses_and_leaves_no_leaf() {
             launch: None,
             proxy: None,
             pinned_roots: Vec::new(),
+            exec_pins: Vec::new(),
             prepare_deadline: ukai_jail::platform::ContinuousDeadline::after(Duration::from_secs(
                 10,
             )),

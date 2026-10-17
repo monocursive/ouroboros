@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use ukai_jail::platform::ExecPin;
 use ukai_jail::platform::linux::bwrap::{self, BwrapPlan, Placeholder, PlaceholderOutcome};
 use ukai_jail::platform::linux::cgroup;
 use ukai_jail::platform::linux::clock::{Deadline, boottime_ns};
@@ -1009,6 +1010,21 @@ impl Launcher {
 
 /// Spawn the launcher directly, outside any sandbox.
 fn spawn_launcher(narrow: bool, target: &[&OsStr]) -> Launcher {
+    spawn_pinned_launcher(narrow, &[], target)
+}
+
+/// [`spawn_launcher`] with `--pin`s.
+fn spawn_pinned_launcher(narrow: bool, pins: &[ExecPin], target: &[&OsStr]) -> Launcher {
+    spawn_launcher_with(narrow, pins, target, &[])
+}
+
+/// [`spawn_pinned_launcher`] with extra environment variables.
+fn spawn_launcher_with(
+    narrow: bool,
+    pins: &[ExecPin],
+    target: &[&OsStr],
+    env: &[(&str, &str)],
+) -> Launcher {
     let (release_r, release_w) = exec::pipe().unwrap();
     let (error_r, error_w) = exec::pipe().unwrap();
     let mut fds = FdMap::new();
@@ -1016,17 +1032,23 @@ fn spawn_launcher(narrow: bool, target: &[&OsStr]) -> Launcher {
     fds.add(error_w, ERROR_FD).unwrap();
 
     let mut command = Command::new(jail_exe());
-    command
-        .arg("__launch")
-        .arg("--release-fd")
-        .arg(RELEASE_FD.to_string())
-        .arg("--error-fd")
-        .arg(ERROR_FD.to_string());
-    if narrow {
-        command.arg("--narrow");
-    }
-    command.arg("--");
-    command.args(target);
+    command.arg("__launch").args(
+        launch::LaunchArgs {
+            release_fd: RELEASE_FD,
+            error_fd: ERROR_FD,
+            narrow,
+            read_open_fast_path: false,
+            trace_data_fd: None,
+            mediate: None,
+            bridge: None,
+            sigmask: None,
+            nofile_soft: None,
+            pins: pins.to_vec(),
+            argv: target.iter().map(|part| part.to_os_string()).collect(),
+        }
+        .to_argv(),
+    );
+    command.envs(env.iter().copied());
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     fds.apply(&mut command);
     let child = command.spawn().unwrap();
@@ -1138,6 +1160,314 @@ fn the_narrowing_filter_with_no_tracer_fails_the_exec_closed() {
     assert!(!marker.exists(), "the target ran without a tracer");
 }
 
+// ===========================================================================
+// J12 review F5: the launcher's own check of a pinned program
+// ===========================================================================
+
+/// The pin resolution would record for the file at `path`.
+fn pin_of(path: &Path, index: usize, by_descriptor: bool) -> ExecPin {
+    let meta = fs::symlink_metadata(path).unwrap();
+    ExecPin {
+        index,
+        by_descriptor,
+        identity: (meta.dev(), meta.ino()),
+        size: meta.size(),
+        mtime: (meta.mtime(), meta.mtime_nsec()),
+        ctime: (meta.ctime(), meta.ctime_nsec()),
+        nlink: meta.nlink(),
+        mode: meta.mode() & 0o7777,
+        uid: meta.uid(),
+    }
+}
+
+/// `bytes` at `path`, mode 0755.
+fn program_file(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A copy of the host's `/bin/sh`, an ELF executable, at `path`.
+fn elf_shell(path: &Path) {
+    program_file(
+        path,
+        &fs::read(Path::new("/bin/sh").canonicalize().unwrap()).unwrap(),
+    );
+    assert_eq!(&fs::read(path).unwrap()[..4], b"\x7fELF");
+}
+
+/// The targets of every descriptor `pid` holds.
+fn descriptor_targets(pid: u32) -> Vec<PathBuf> {
+    fs::read_dir(format!("/proc/{pid}/fd"))
+        .unwrap()
+        .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+        .collect()
+}
+
+/// A failed exec's report: the errno, and whether it is a changed program.
+fn exec_report(error: &[u8]) -> (Option<i32>, bool) {
+    let failure = launch::decode_exec_failure(error);
+    (
+        failure.map(|failure| failure.errno),
+        failure.is_some_and(|failure| failure.program_changed),
+    )
+}
+
+/// Review F5: a pinned ELF program is opened before the release and run
+/// through that descriptor: the launcher holds it while blocked, the
+/// target's image is the program and the target never holds the
+/// descriptor.
+#[test]
+fn a_pinned_elf_program_runs_through_the_descriptor_its_check_opened() {
+    let dir = temp_dir("pin-elf");
+    let program = dir.path().join("agent");
+    elf_shell(&program);
+    let report = dir.path().join("report");
+    let script = format!(
+        "readlink /proc/$$/exe > {r}; for f in /proc/$$/fd/*; do readlink \"$f\"; done >> {r}; true",
+        r = report.display()
+    );
+    let mut launcher = spawn_pinned_launcher(
+        false,
+        &[pin_of(&program, 0, true)],
+        &[program.as_os_str(), OsStr::new("-c"), OsStr::new(&script)],
+    );
+    let pid = launcher.child.id();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !descriptor_targets(pid).contains(&program) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the blocked launcher never held the program: {:?}",
+            descriptor_targets(pid)
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!report.exists(), "the target ran before release");
+    launcher.release();
+    let error = launcher.error_bytes();
+    let captured = launcher.finish();
+    assert!(error.is_empty(), "{error:?} {captured:?}");
+    assert_eq!(captured.code(), Some(0), "{captured:?}");
+    let report = fs::read_to_string(&report).unwrap();
+    let mut lines = report.lines();
+    assert_eq!(lines.next(), Some(program.to_str().unwrap()), "{report}");
+    assert!(
+        lines.all(|line| line != program.to_str().unwrap()),
+        "the target holds the program's descriptor: {report}"
+    );
+}
+
+/// Review F5, what the target can see of it: executed through a
+/// descriptor, the program's `AT_EXECFN` is `/dev/fd/N` rather than its
+/// path (the dynamic loader prints it under `LD_SHOW_AUXV`); its argv 0 and
+/// `/proc/self/exe` stay the program's own path. A program that names
+/// itself from `AT_EXECFN` (uutils' multi-call coreutils does) sees the
+/// descriptor number; operating.md says so.
+#[test]
+fn a_program_run_through_its_descriptor_sees_dev_fd_as_its_execfn() {
+    let dir = temp_dir("pin-execfn");
+    let program = dir.path().join("agent");
+    elf_shell(&program);
+    let mut launcher = spawn_launcher_with(
+        false,
+        &[pin_of(&program, 0, true)],
+        &[
+            program.as_os_str(),
+            OsStr::new("-c"),
+            OsStr::new("echo \"argv0=$0\""),
+        ],
+        &[("LD_SHOW_AUXV", "1")],
+    );
+    launcher.release();
+    let error = launcher.error_bytes();
+    let captured = launcher.finish();
+    assert!(error.is_empty(), "{error:?} {captured:?}");
+    assert_eq!(captured.code(), Some(0), "{captured:?}");
+    // The launcher's own start prints its auxv first; the target's is the
+    // last one before its own output.
+    let execfns: Vec<&str> = captured
+        .stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("AT_EXECFN:"))
+        .map(str::trim)
+        .collect();
+    let last = execfns
+        .last()
+        .unwrap_or_else(|| panic!("glibc's loader prints LD_SHOW_AUXV: {captured:?}"));
+    assert!(last.starts_with("/dev/fd/"), "{execfns:?}\n{captured:?}");
+    assert!(
+        captured
+            .stdout
+            .lines()
+            .any(|line| line == format!("argv0={}", program.display())),
+        "{captured:?}"
+    );
+}
+
+/// Review F5: a program renamed over, or written in place, after the
+/// launcher opened it and before its exec is refused as changed (`ESTALE`
+/// with its own detail): neither the pinned file nor its replacement runs.
+#[test]
+fn a_pinned_elf_program_changed_while_the_launcher_waits_is_refused() {
+    type Change = fn(&Path, &Path);
+    let changes: [(&str, Change); 3] = [
+        ("renamed over", |program, marker| {
+            let swapped = program.with_file_name("swapped");
+            program_file(
+                &swapped,
+                format!("#!/bin/sh\necho swapped > {}\n", marker.display()).as_bytes(),
+            );
+            fs::rename(&swapped, program).unwrap();
+        }),
+        ("written in place", |program, _| {
+            let mut file = fs::OpenOptions::new().append(true).open(program).unwrap();
+            file.write_all(b"\0").unwrap();
+        }),
+        ("given a second name", |program, _| {
+            fs::hard_link(program, program.with_file_name("second")).unwrap();
+        }),
+    ];
+    for (label, change) in changes {
+        let dir = temp_dir("pin-swap");
+        let program = dir.path().join("agent");
+        elf_shell(&program);
+        let marker = dir.path().join("marker");
+        let script = format!("echo ran > {}", marker.display());
+        let mut launcher = spawn_pinned_launcher(
+            false,
+            &[pin_of(&program, 0, true)],
+            &[program.as_os_str(), OsStr::new("-c"), OsStr::new(&script)],
+        );
+        let pid = launcher.child.id();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !descriptor_targets(pid).contains(&program) {
+            assert!(std::time::Instant::now() < deadline, "{label}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        change(&program, &marker);
+        launcher.release();
+        let error = launcher.error_bytes();
+        let captured = launcher.finish();
+        assert_eq!(exec_report(&error), (Some(libc::ESTALE), true), "{label}");
+        assert_eq!(
+            captured.code(),
+            Some(launch::EXIT_EXEC_FAILED),
+            "{label}: {captured:?}"
+        );
+        assert!(!marker.exists(), "{label}: something ran");
+    }
+}
+
+/// Review F5: a pinned `#!` script is checked by its path just before its
+/// exec, and runs by that path; one renamed over is refused. After an
+/// `env` expansion the interpreter runs by descriptor and the script it is
+/// handed is checked by path: either swapped is refused.
+#[test]
+fn pinned_scripts_are_checked_by_path_and_an_expanded_interpreter_runs_by_descriptor() {
+    let dir = temp_dir("pin-script");
+    let marker = dir.path().join("marker");
+    let script = dir.path().join("agent");
+    let body = format!("#!/bin/sh\necho \"$0\" > {}\n", marker.display());
+    program_file(&script, body.as_bytes());
+    let interpreter = dir.path().join("mysh");
+    elf_shell(&interpreter);
+    /// The script alone, and the expansion `[interpreter, script]`, each
+    /// with the pins their files have now.
+    fn cases<'a>(
+        script: &'a Path,
+        interpreter: &'a Path,
+    ) -> Vec<(&'static str, Vec<ExecPin>, Vec<&'a OsStr>)> {
+        vec![
+            (
+                "script",
+                vec![pin_of(script, 0, false)],
+                vec![script.as_os_str()],
+            ),
+            (
+                "expanded",
+                vec![pin_of(interpreter, 0, true), pin_of(script, 1, false)],
+                vec![interpreter.as_os_str(), script.as_os_str()],
+            ),
+        ]
+    }
+    for (label, pins, argv) in cases(&script, &interpreter) {
+        let _ = fs::remove_file(&marker);
+        let mut launcher = spawn_pinned_launcher(false, &pins, &argv);
+        launcher.release();
+        let error = launcher.error_bytes();
+        let captured = launcher.finish();
+        assert!(error.is_empty(), "{label}: {error:?} {captured:?}");
+        assert_eq!(captured.code(), Some(0), "{label}");
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap().trim(),
+            script.to_str().unwrap(),
+            "{label}"
+        );
+    }
+    // Each pinned file swapped after the launcher started.
+    for (label, victim) in [
+        ("script", 0usize),
+        ("expanded: script", 1),
+        ("expanded: interpreter", 0),
+    ] {
+        let _ = fs::remove_file(&marker);
+        let all = cases(&script, &interpreter);
+        let (_, pins, argv) = if label == "script" { &all[0] } else { &all[1] };
+        let mut launcher = spawn_pinned_launcher(false, pins, argv);
+        let swapped = dir.path().join("swapped");
+        program_file(
+            &swapped,
+            format!("#!/bin/sh\necho swapped > {}\n", marker.display()).as_bytes(),
+        );
+        let target = Path::new(argv[victim]).to_path_buf();
+        let kept = dir.path().join("kept");
+        fs::rename(&target, &kept).unwrap();
+        fs::rename(&swapped, &target).unwrap();
+        launcher.release();
+        let error = launcher.error_bytes();
+        let captured = launcher.finish();
+        assert_eq!(exec_report(&error), (Some(libc::ESTALE), true), "{label}");
+        assert_eq!(captured.code(), Some(launch::EXIT_EXEC_FAILED), "{label}");
+        assert!(!marker.exists(), "{label}: something ran");
+        // Put the original back for the next case: a fresh pin is taken.
+        fs::rename(&kept, &target).unwrap();
+    }
+}
+
+/// Review F5: a pinned program that cannot be reached is the exec failure
+/// an exec by path would have reported (ENOENT, no "changed" detail), and a
+/// pin that names another file from the start is refused as changed.
+#[test]
+fn an_unreachable_or_foreign_pin_never_runs() {
+    let dir = temp_dir("pin-gone");
+    let program = dir.path().join("agent");
+    elf_shell(&program);
+    let marker = dir.path().join("marker");
+    let script = format!("echo ran > {}", marker.display());
+    let argv = [program.as_os_str(), OsStr::new("-c"), OsStr::new(&script)];
+    for by_descriptor in [true, false] {
+        let pin = pin_of(&program, 0, by_descriptor);
+        let mut foreign = pin;
+        foreign.identity.1 += 1;
+        let mut launcher = spawn_pinned_launcher(false, &[foreign], &argv);
+        launcher.release();
+        let error = launcher.error_bytes();
+        let captured = launcher.finish();
+        assert_eq!(exec_report(&error), (Some(libc::ESTALE), true));
+        assert_eq!(captured.code(), Some(launch::EXIT_EXEC_FAILED));
+
+        let gone = dir.path().join("agent.gone");
+        fs::rename(&program, &gone).unwrap();
+        let mut launcher = spawn_pinned_launcher(false, &[pin], &argv);
+        launcher.release();
+        let error = launcher.error_bytes();
+        let captured = launcher.finish();
+        assert_eq!(exec_report(&error), (Some(libc::ENOENT), false));
+        assert_eq!(captured.code(), Some(launch::EXIT_EXEC_FAILED));
+        fs::rename(&gone, &program).unwrap();
+        assert!(!marker.exists(), "something ran");
+    }
+}
+
 #[test]
 fn a_launcher_given_a_closed_descriptor_refuses_as_a_usage_error() {
     let captured = exec::run_captured(
@@ -1240,6 +1570,7 @@ fn run_tool_profile(long_options: bool, narrow: bool) -> ToolRun {
             bridge: None,
             sigmask: None,
             nofile_soft: None,
+            pins: Vec::new(),
             argv: target,
         }
         .command_line(OsStr::new(bwrap::JAIL_INSIDE_PATH)),
