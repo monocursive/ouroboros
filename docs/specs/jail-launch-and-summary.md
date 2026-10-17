@@ -944,7 +944,8 @@ the code is stricter than §3 the text above still describes the intent.
       working directory, or in a directory under `/usr` that the operator
       owns (a chowned `/usr/local`) or a group can write, refuses.
     - **§3.3 step 5 is enforced as written:** the loader (`PT_INTERP`) must
-      pass that rule. A loader in an install root outside `/usr`, a link
+      pass that rule. A loader in an install root outside the runtime
+      roots, a link
       outside the runtime roots to a system loader, and a `..` that leads
       outside them refuse with `exec_interpreter_missing`, as do a missing
       loader and one that cannot be followed: inside the jail such a path
@@ -970,10 +971,15 @@ the code is stricter than §3 the text above still describes the intent.
       resolution does not know; a library name holding a `$` anywhere
       (glibc expands a token there before deciding whether the name is a
       path, so `${ORIGIN}x` becomes one; musl never expands it); and a
-      relative library path. The check runs whether or not the file names
-      a loader, and follows each distinct path once.
+      relative library path. In each search directory that exists and
+      passes, the file the loader would take for a name without a `/`
+      (there, or in the directory's `glibc-hwcaps` subdirectories) must pass
+      too: only root can add a name to the directory, but a file in it need
+      not be root's (an operator's library moved there with `sudo mv`). The
+      check runs whether or not the file names a loader, and follows each
+      distinct path once.
     - **Headers this check would read otherwise than a loader** refuse as
-      `invalid_config`: a dynamic section or string table outside the
+      `invalid_config`, among them: a dynamic section or string table outside the
       loaded segments, a string outside its table, a table with no
       `DT_NULL` within its size (the loaders read on), several `PT_INTERP`
       headers (the kernel opens the first; musl names itself after the
@@ -998,8 +1004,7 @@ the code is stricter than §3 the text above still describes the intent.
       (`ukai-jail node`), carries `DT_RUNPATH` `$ORIGIN/../lib:$ORIGIN/`,
       which stays in root's `/usr`, so it resolves; the same file copied
       into an install root is refused. All checked by hand on the
-      reference host, 2026-10-17 (the agents, with the change before its
-      review fixes). Programs that find libraries shipped beside them
+      reference host with this change, 2026-10-17. Programs that find libraries shipped beside them
       through `$ORIGIN`, such as a conda or uv Python, an Electron app or a
       JDK unpacked in the home directory, are refused under `--from-path`;
       run them with explicit grants and without `@program`.
@@ -1008,16 +1013,23 @@ the code is stricter than §3 the text above still describes the intent.
       (an x32 program's) is refused, which J12 accepted.
 
     Proved by unit tests in `program.rs` (`review_f2_*`, with the review's
-    `review_f2k_*`): each refusal above, under `DT_RUNPATH` and `DT_RPATH`
+    `review_f2k_*` and `review_f2r2_*`): each refusal above, under `DT_RUNPATH` and `DT_RPATH`
     alike, and the forms that pass; the loader read and a `DT_RUNPATH`
     refusal in 32- and 64-bit images of both byte orders; a decoy table at
     `PT_DYNAMIC`'s file offset; an entry past `DT_NULL` (ignored); virtual
     addresses and file sizes, not physical addresses or memory sizes;
     `$ORIGIN` as the program's own directory, not its install root; the
     interpreter an expansion pins; each header refusal and bound; the owner
-    and mode rule on this operator's home directory and on `/tmp` (taken as
-    runtime roots for the test), and a system file passing it; and, on
-    Linux, the host shell's real headers. On the reference host through
+    and mode rule on this operator's home directory, on `/tmp` and on a
+    group-writable directory root owns (`/var/mail` where one exists), each
+    taken as runtime roots for the test, on `/` through a test seam that
+    stands another directory in for it, and a system file passing it; a
+    41st link as unreachable; and, on Linux, the host shell's real headers.
+    Where `/usr/bin` holds a file root does not own alone (macOS, whose uucp
+    tools belong to `_uucp`), the review's tests also show it refused as a
+    loader (`policy_widening`), as a library path and as a library found by
+    name in a passing `DT_RUNPATH` directory; on the reference host no such
+    file exists, so there those three say so and pass. On the reference host through
     the CLI (`from_path_linux.rs`, `f2_*`), under `tool` and `agent`: the
     host's `/bin/sh` patched to use a copy of the host's loader in its
     install root, and patched with a relative `DT_RUNPATH`, each runs on
@@ -1025,16 +1037,18 @@ the code is stricter than §3 the text above still describes the intent.
     programs with a `$ORIGIN` entry and with an entry inside the
     repository are refused the same way; and `/proc/self/exe` names a
     program executed through the launcher's descriptor by its own path.
-    Not exercised by a test: a refusal for `/` itself, or for a location in
-    the runtime roots that root does not own alone (neither exists on a
-    stock host, and a test cannot make one without root); the code a
-    loader refused for that reason carries is unit-tested. What remains:
-    - **What the loader takes without a path to check:** a library it
-      picks by name inside a directory that passed (its directory is
-      root's alone; the file itself is not checked), the system's own
-      library directories, and its configuration (`/etc/ld.so.cache`,
-      bound where present, and musl's `/etc/ld-musl-ARCH.path`, which can
-      name directories elsewhere). These are trusted as the system's own.
+    What remains:
+    - **What the loader takes without a path to check:** the system's own
+      library directories; a library a dependency needs, which glibc also
+      seeks in the program's `DT_RPATH` directories (only the program's own
+      names are looked up there); the hardware-capability subdirectories
+      other than `glibc-hwcaps` that glibc before 2.37 searched; and its
+      configuration (`/etc/ld.so.cache`, bound where present, can name
+      directories elsewhere). These are trusted as the system's own.
+    - **Owners and modes are taken as the filesystem reports them:** a
+      FUSE filesystem the operator mounted on a directory it owns under
+      `/usr` could report root's for files it serves (by reading; none on a
+      stock host, and the directory would have to exist first).
     - **Files the program opens once it runs:** a library it loads later by
       a path of its own, or scripts and data it reads from the install
       root. A process running as the operator that replaces one runs its

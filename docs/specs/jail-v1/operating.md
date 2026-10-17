@@ -562,11 +562,10 @@ With `--from-path` (which the alias implies):
   the program that runs; a change is refused as an exec error
   (`outcome.cause` `ESTALE`, `policy_widening` at `--from-path`, exit 125)
   and nothing runs. What remains: the pin covers the program's own file;
-  its loader and the directories its libraries come from are root's alone
-  (above), but the libraries the loader picks by name there, the system's
-  own library directories and configuration (`/etc/ld.so.cache`, musl's
-  `/etc/ld-musl-*.path`) are trusted unchecked, and files it opens once it
-  runs (a library it loads later by a path of its own, scripts and data in
+  its loader, the directories its libraries come from and the libraries it
+  would pick there are root's alone (above), but the system's own library
+  directories and the loader's configuration (`/etc/ld.so.cache`) are
+  trusted unchecked, and files it opens once it runs (a library it loads later by a path of its own, scripts and data in
   the install root) a process running as you can still replace (its code
   then runs inside the program, credential included); a
   write in place whose write and close both fall between the launcher's

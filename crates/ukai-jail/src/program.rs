@@ -572,11 +572,28 @@ fn reach_in_runtime_roots(path: &Path) -> Result<Reach, Escape> {
 /// [`reach_in_runtime_roots`] with `inside` deciding which locations are
 /// the runtime roots, so a test can name a tree it made.
 fn reach_within(path: &Path, inside: &dyn Fn(&Path) -> bool) -> Result<Reach, Escape> {
+    reach_within_below(Path::new("/"), path, inside)
+}
+
+/// Whether an object someone other than root could change: not root's, or
+/// writable by its group or by others. A link's own owner and mode do not
+/// count: replacing it takes a write to its directory.
+fn changeable_object(link: bool, uid: u32, mode: u32) -> bool {
+    !link && (uid != 0 || mode & 0o022 != 0)
+}
+
+/// [`reach_within`] with `top` standing for `/` in the owner and mode rule,
+/// so a test can make the check of `/` see a directory root does not own.
+fn reach_within_below(
+    top: &Path,
+    path: &Path,
+    inside: &dyn Fn(&Path) -> bool,
+) -> Result<Reach, Escape> {
     let changeable = |location: &Path| {
         use std::os::unix::fs::MetadataExt as _;
         let metadata = std::fs::symlink_metadata(location).ok()?;
         let (uid, mode) = (metadata.uid(), metadata.mode() & 0o7777);
-        (!metadata.file_type().is_symlink() && (uid != 0 || mode & 0o022 != 0)).then(|| {
+        changeable_object(metadata.file_type().is_symlink(), uid, mode).then(|| {
             Escape::Changeable {
                 location: location.to_path_buf(),
                 uid,
@@ -584,7 +601,7 @@ fn reach_within(path: &Path, inside: &dyn Fn(&Path) -> bool) -> Result<Reach, Es
             }
         })
     };
-    if let Some(escape) = changeable(Path::new("/")) {
+    if let Some(escape) = changeable(top) {
         return Err(escape);
     }
     let mut escape = None;
@@ -1264,12 +1281,19 @@ fn check_loader(executable: &Executable, loader: Option<&Path>) -> Result<(), Ja
 ///   refuses wherever the `$` is: glibc expands a token there before
 ///   deciding whether the name is a path (`${ORIGIN}x` becomes one), musl
 ///   never does. A name with neither is searched for on the path checked
-///   here and in the system's own directories.
+///   here and in the system's own directories;
+/// - in each search directory that exists and passed, the file the loader
+///   would take for such a name (there, or in its `glibc-hwcaps`
+///   subdirectories) must pass too: the directory is root's alone, so what
+///   exists now is all it can hold, but a file in it need not be.
 ///
 /// Each distinct path is followed once.
 fn check_libraries(executable: &Executable, libraries: &[(u64, Vec<u8>)]) -> Result<(), JailError> {
     let origin = executable.path.parent().unwrap_or(Path::new("/"));
-    let mut followed = std::collections::HashSet::new();
+    let mut followed = std::collections::HashMap::new();
+    // Search directories that exist and passed, and the names the loader
+    // looks for in them.
+    let (mut directories, mut wanted): (Vec<Vec<u8>>, Vec<&[u8]>) = (Vec::new(), Vec::new());
     for (tag, value) in libraries {
         let what = match *tag {
             DT_NEEDED => "DT_NEEDED",
@@ -1288,13 +1312,14 @@ fn check_libraries(executable: &Executable, libraries: &[(u64, Vec<u8>)]) -> Res
                 String::from_utf8_lossy(value),
             ))
         };
-        let mut follow = |path: &[u8], shown: String| -> Result<(), JailError> {
-            if !followed.insert(path.to_vec()) {
-                return Ok(());
+        let mut follow = |path: &[u8], shown: String| -> Result<Reach, JailError> {
+            if let Some(reach) = followed.get(path) {
+                return Ok(*reach);
             }
-            reach_in_runtime_roots(Path::new(OsStr::from_bytes(path)))
-                .map(|_| ())
-                .map_err(|escape| refuse(format!("{shown} {}", escape.describe())))
+            let reach = reach_in_runtime_roots(Path::new(OsStr::from_bytes(path)))
+                .map_err(|escape| refuse(format!("{shown} {}", escape.describe())))?;
+            followed.insert(path.to_vec(), reach);
+            Ok(reach)
         };
         if matches!(*tag, DT_RPATH | DT_RUNPATH) {
             for entry in value.split(|byte| matches!(*byte, b':' | b'\n')) {
@@ -1318,7 +1343,10 @@ fn check_libraries(executable: &Executable, libraries: &[(u64, Vec<u8>)]) -> Res
                     "the entry `{shown}` ({})",
                     String::from_utf8_lossy(&expanded)
                 );
-                follow(&expanded, described)?;
+                if follow(&expanded, described)? == Reach::Found && !directories.contains(&expanded)
+                {
+                    directories.push(expanded);
+                }
             }
             continue;
         }
@@ -1335,6 +1363,9 @@ fn check_libraries(executable: &Executable, libraries: &[(u64, Vec<u8>)]) -> Res
                 )));
             }
             if !name.contains(&b'/') {
+                if !name.is_empty() && !wanted.contains(&name) {
+                    wanted.push(name);
+                }
                 continue;
             }
             if name.first() != Some(&b'/') {
@@ -1343,6 +1374,35 @@ fn check_libraries(executable: &Executable, libraries: &[(u64, Vec<u8>)]) -> Res
                 )));
             }
             follow(name, format!("the library `{shown}`"))?;
+        }
+    }
+    // Review of the F2 fixes, R2-A: what the loader would pick by name in
+    // a directory that passed. Only root can add a name there, so what
+    // exists now is all it could pick.
+    for directory in &directories {
+        let directory = Path::new(OsStr::from_bytes(directory));
+        let mut places = vec![directory.to_path_buf()];
+        if let Ok(entries) = std::fs::read_dir(directory.join("glibc-hwcaps")) {
+            places.extend(entries.filter_map(Result::ok).map(|entry| entry.path()));
+        }
+        for place in &places {
+            for name in &wanted {
+                let candidate = place.join(OsStr::from_bytes(name));
+                if std::fs::symlink_metadata(&candidate).is_err() {
+                    continue;
+                }
+                if let Err(escape) = reach_in_runtime_roots(&candidate) {
+                    return Err(widening(format!(
+                        "{} needs `{}`, which the loader would take as {}: it {}. --from-path \
+                         pins the program's own file; a library it loads must come from the \
+                         runtime roots, where only root can change it",
+                        executable.path.display(),
+                        String::from_utf8_lossy(name),
+                        candidate.display(),
+                        escape.describe()
+                    )));
+                }
+            }
         }
     }
     Ok(())
@@ -3032,6 +3092,22 @@ mod tests {
         }
     }
 
+    /// Review of F2, finding 9: only a missing name, a file used as a
+    /// directory or a link loop makes a path unreachable; any other
+    /// resolution error refuses rather than passing as unreachable (here
+    /// the walk's own refusal of a relative path).
+    #[test]
+    fn review_f2_an_error_other_than_a_missing_name_refuses() {
+        assert!(matches!(
+            reach_in_runtime_roots(Path::new("usr/lib")),
+            Err(Escape::Unfollowable(_))
+        ));
+        assert_eq!(
+            reach_in_runtime_roots(Path::new("/usr/bin/env/x")),
+            Ok(Reach::Unreachable)
+        );
+    }
+
     /// A location someone other than root could change is named with its
     /// owner and mode, and a loader there is `policy_widening` (the jail
     /// shows it, but it could be replaced), not `exec_interpreter_missing`.
@@ -3103,5 +3179,287 @@ mod tests {
         let file = File::open(&path).unwrap();
         let error = elf_headers(&file, &head).expect_err("over the total bound");
         assert!(error.contains("exceed"), "{error}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Review of the F2 fixes (857a42223): killer tests (`review_f2r2_*`)
+    // -----------------------------------------------------------------------
+
+    /// A location in the runtime roots that is not root's alone, when the
+    /// host has one: macOS ships its uucp tools in `/usr/bin` owned by
+    /// `_uucp`. `None` on a host where every such file is root's alone.
+    fn changeable_system_file() -> Option<PathBuf> {
+        use std::os::unix::fs::MetadataExt as _;
+        let mut entries: Vec<PathBuf> = std::fs::read_dir("/usr/bin")
+            .ok()?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect();
+        entries.sort();
+        entries.into_iter().find(|path| {
+            std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+                !metadata.file_type().is_symlink()
+                    && (metadata.uid() != 0 || metadata.mode() & 0o022 != 0)
+            })
+        })
+    }
+
+    /// Kills: `check_loader` refusing a changeable loader with a fixed code
+    /// instead of `Escape::loader_code`, and `check_libraries` letting a
+    /// changeable library path through. Runs where the host has such a file
+    /// in `/usr/bin` (macOS); elsewhere it says so and passes.
+    #[test]
+    fn review_f2r2_a_system_file_root_does_not_own_alone_refuses() {
+        let Some(file) = changeable_system_file() else {
+            eprintln!("no file in /usr/bin that root does not own alone: not exercised here");
+            return;
+        };
+        let pinned = pinned_system(2);
+        let error = check_loader(&pinned, Some(&file)).expect_err("a changeable loader");
+        assert_eq!(error.code, ErrorCode::PolicyWidening, "{}", error.message);
+        assert!(error.message.contains("owned by uid"), "{}", error.message);
+        let error = check_libraries(
+            &pinned,
+            &[(DT_NEEDED, file.as_os_str().as_bytes().to_vec())],
+        )
+        .expect_err("a changeable library");
+        assert_eq!(error.code, ErrorCode::PolicyWidening, "{}", error.message);
+        assert!(error.message.contains("owned by uid"), "{}", error.message);
+    }
+
+    /// Kills: the mode rule reduced to other-write (`0o002`): a directory
+    /// root owns that its group can write refuses. `/var/mail` or
+    /// `/var/local` is one on macOS and Debian-family hosts.
+    #[test]
+    fn review_f2r2_a_group_writable_root_directory_is_changeable() {
+        use std::os::unix::fs::MetadataExt as _;
+        let Some(directory) = ["/var/mail", "/var/local"]
+            .iter()
+            .filter_map(|path| std::fs::canonicalize(path).ok())
+            .find(|path| {
+                std::fs::metadata(path).is_ok_and(|metadata| {
+                    metadata.uid() == 0
+                        && metadata.mode() & 0o020 != 0
+                        && metadata.mode() & 0o002 == 0
+                })
+            })
+        else {
+            eprintln!("no root-owned group-writable directory found: not exercised here");
+            return;
+        };
+        match reach_within(&directory.join("ukai-no-such-x"), &|_| true) {
+            Err(Escape::Changeable { location, uid, .. }) => {
+                assert_eq!((location, uid), (directory, 0));
+            }
+            other => panic!("{}: {other:?}", directory.display()),
+        }
+    }
+
+    /// Kills: a link loop counted as unfollowable rather than unreachable.
+    /// A 41st link, each one root's (`/var` on macOS, `/bin` on a
+    /// merged-`/usr` host), end in `ELOOP`, as the kernel's walk does.
+    #[test]
+    fn review_f2r2_too_many_links_are_unreachable_not_unfollowable() {
+        let Some((link, depth)) = ["/var", "/bin", "/lib"].iter().find_map(|link| {
+            let metadata = std::fs::symlink_metadata(link).ok()?;
+            let target = std::fs::canonicalize(link).ok()?;
+            metadata
+                .file_type()
+                .is_symlink()
+                .then(|| (*link, target.components().count() - 1))
+        }) else {
+            eprintln!("no root-level link to loop through: not exercised here");
+            return;
+        };
+        let lap = format!("{link}{}", "/..".repeat(depth));
+        let path = format!("{}{link}", lap.repeat(LINKS_MAX));
+        assert_eq!(
+            reach_within(Path::new(&path), &|_| true),
+            Ok(Reach::Unreachable),
+            "{path}"
+        );
+        // Forty links are followed.
+        let path = format!("{}{link}", lap.repeat(LINKS_MAX - 1));
+        assert_eq!(reach_within(Path::new(&path), &|_| true), Ok(Reach::Found));
+    }
+
+    /// Kills: an error other than a missing name, a file used as a
+    /// directory or a loop counted as unreachable (the failure J12's
+    /// review found open): a relative path cannot be followed.
+    #[test]
+    fn review_f2r2_a_relative_path_cannot_be_followed() {
+        assert!(
+            matches!(
+                reach_in_runtime_roots(Path::new("libc.so.6")),
+                Err(Escape::Unfollowable(_))
+            ),
+            "{:?}",
+            reach_in_runtime_roots(Path::new("libc.so.6"))
+        );
+    }
+
+    /// Kills: `DT_FILTER` split at `:` like the audit lists: glibc opens
+    /// `x:/usr/lib/y.so` as one relative path, from the working directory.
+    #[test]
+    fn review_f2r2_a_filter_name_is_one_path_colons_and_all() {
+        let (_dir, root) = tree();
+        for tag in [elf::DT_FILTER, elf::DT_AUXILIARY] {
+            assert_refused(
+                resolve_image(
+                    &root,
+                    &Image::new()
+                        .interp(SYSTEM_FILE)
+                        .entry(tag, "x:/usr/lib/y.so"),
+                ),
+                ErrorCode::PolicyWidening,
+                &["relative library"],
+                &format!("{tag:#x}"),
+            );
+        }
+    }
+
+    /// Kills: a program header size larger than the kernel's accepted (the
+    /// kernel refuses any size but its own).
+    #[test]
+    fn review_f2r2_a_larger_program_header_size_refuses() {
+        let (_dir, root) = tree();
+        let mut bytes = Image::new().interp(SYSTEM_FILE).bytes();
+        // One 64-byte header: the PT_INTERP and 8 bytes of the next.
+        put(&mut bytes, 54, 2, 64);
+        put(&mut bytes, 56, 2, 1);
+        let error = resolve_bytes(&root, &bytes).expect_err("64-byte headers");
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{}", error.message);
+        assert!(
+            error.message.contains("program headers are malformed"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// Kills: the 1 MiB total raised or made strict: exactly 1 MiB of names
+    /// passes, one byte more refuses.
+    #[test]
+    fn review_f2r2_the_total_bound_is_exactly_one_mebibyte() {
+        let (_dir, root) = tree();
+        for (last, passes) in [(16, true), (17, false)] {
+            let mut image = Image::new().interp(SYSTEM_FILE);
+            for index in 0..16u8 {
+                let name = format!("{}", char::from(b'a' + index)).repeat(65_535);
+                image = image.entry(elf::DT_NEEDED, name);
+            }
+            image = image.entry(elf::DT_NEEDED, "z".repeat(last));
+            let path = root.join(format!("names-{last}"));
+            std::fs::write(&path, image.bytes()).unwrap();
+            let file = File::open(&path).unwrap();
+            let head = read_at(&file, 0, SHEBANG_MAX as u64).unwrap();
+            let result = elf_headers(&file, &head);
+            if passes {
+                let held: usize = result
+                    .unwrap()
+                    .libraries
+                    .iter()
+                    .map(|(_, name)| name.len())
+                    .sum();
+                assert_eq!(held, ELF_LIBRARY_BYTES_MAX);
+            } else {
+                assert!(result.expect_err("over 1 MiB").contains("exceed"));
+            }
+        }
+    }
+
+    /// Kills: entries deduplicated by their string alone: the same string
+    /// is a harmless `DT_NEEDED` name and a relative `DT_RUNPATH` entry.
+    #[test]
+    fn review_f2r2_one_string_under_two_tags_is_checked_under_both() {
+        let (_dir, root) = tree();
+        let mut bytes = Image::new()
+            .interp(SYSTEM_FILE)
+            .entry(elf::DT_NEEDED, "lib")
+            .entry(elf::DT_RUNPATH, "/usr/lib")
+            .bytes();
+        let table = table_at(&bytes);
+        let needed = get(&bytes, table + 2 * 16 + 8, 8);
+        put(&mut bytes, table + 3 * 16 + 8, 8, needed);
+        assert_refused(
+            resolve_bytes(&root, &bytes),
+            ErrorCode::PolicyWidening,
+            &["DT_RUNPATH", "relative entry"],
+            "shared string",
+        );
+    }
+
+    /// R2-A, the other way: a library found by name in a search directory
+    /// that passed, and root's alone, passes; a name found nowhere there
+    /// is the system directories' business.
+    #[test]
+    fn review_f2_a_root_owned_library_found_by_name_passes() {
+        let pinned = pinned_system(2);
+        check_libraries(
+            &pinned,
+            &[
+                (DT_RUNPATH, b"/usr/bin".to_vec()),
+                (DT_NEEDED, b"env".to_vec()),
+                (DT_NEEDED, b"ukai-no-such-library.so".to_vec()),
+            ],
+        )
+        .unwrap();
+    }
+
+    /// Review of the F2 fixes, R2-A: the rule applies to the library the
+    /// loader would open by name in a search directory that passed, not
+    /// only to the directory. Here `/usr/bin` passes as a `DT_RUNPATH`
+    /// entry and the loader would open `/usr/bin/<file>` for a `DT_NEEDED`
+    /// `<file>` that root does not own alone. An operator-owned library
+    /// left in a root-owned directory (`sudo mv`, `sudo cp -p`) is the case
+    /// that matters. Runs where the host has such a file in `/usr/bin`
+    /// (macOS); elsewhere it says so and passes.
+    #[test]
+    fn review_f2r2_a_library_found_by_name_passes_the_same_rule() {
+        let Some(file) = changeable_system_file() else {
+            eprintln!("no file in /usr/bin that root does not own alone: not exercised here");
+            return;
+        };
+        let name = file.file_name().unwrap().as_bytes().to_vec();
+        let pinned = pinned_system(2);
+        assert!(
+            check_libraries(
+                &pinned,
+                &[(DT_RUNPATH, b"/usr/bin".to_vec()), (DT_NEEDED, name)]
+            )
+            .is_err(),
+            "{} is opened by name from a search directory that passed",
+            file.display()
+        );
+    }
+
+    /// Kills (with the `reach_within_below` and `changeable_object` seam):
+    /// the check of `/` left out, and the owner and mode rule weakened in
+    /// a way no stock host shows (other-write alone, a link's own mode).
+    #[test]
+    fn review_f2r2_root_and_the_owner_and_mode_rule_are_checked() {
+        for (link, uid, mode, changeable) in [
+            (false, 0, 0o755, false),
+            (false, 0, 0o555, false),
+            (false, 0, 0o4755, false),
+            (false, 0, 0o757, true),
+            (false, 0, 0o1757, true),
+            (false, 0, 0o775, true),
+            (false, 0, 0o1777, true),
+            (false, 4, 0o555, true),
+            (true, 0, 0o777, false),
+            (true, 4242, 0o777, false),
+        ] {
+            assert_eq!(
+                changeable_object(link, uid, mode),
+                changeable,
+                "link {link} uid {uid} mode {mode:o}"
+            );
+        }
+        if crate::state::effective_uid() != 0 {
+            let home = std::fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap();
+            match reach_within_below(&home, Path::new(SYSTEM_FILE), &in_runtime_roots) {
+                Err(Escape::Changeable { location, .. }) => assert_eq!(location, home),
+                other => panic!("{}: {other:?}", home.display()),
+            }
+        }
     }
 }
