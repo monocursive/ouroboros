@@ -1495,6 +1495,90 @@ fn an_unreachable_or_foreign_pin_never_runs() {
     }
 }
 
+/// Waits until the blocked launcher `pid` holds `path` open, killing it and
+/// failing when it never does.
+fn wait_until_held(launcher: &mut Launcher, path: &Path, label: &str) {
+    let pid = launcher.child.id();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !descriptor_targets(pid).contains(&path.to_path_buf()) {
+        if std::time::Instant::now() >= deadline {
+            let _ = launcher.child.kill();
+            panic!("{label}: the launcher never held {}", path.display());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Review F5: a pin by descriptor is checked through the descriptor, not
+/// its path.
+/// The program's directory is swapped for another holding a different ELF
+/// while the launcher opens it, and swapped back before the release. The
+/// path then names the pinned file, unchanged (renaming its directory does
+/// not touch it), while the descriptor holds the other file: only a check
+/// of the descriptor refuses, and neither file runs.
+#[test]
+fn a_directory_swapped_around_the_launchers_open_is_refused() {
+    let dir = temp_dir("pin-dirswap");
+    let bin = dir.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let program = bin.join("agent");
+    elf_shell(&program);
+    let pin = pin_of(&program, 0, true);
+    let kept = dir.path().join("bin.kept");
+    fs::rename(&bin, &kept).unwrap();
+    fs::create_dir(&bin).unwrap();
+    elf_shell(&program);
+    let marker = dir.path().join("marker");
+    let script = format!("echo ran > {}", marker.display());
+    let mut launcher = spawn_pinned_launcher(
+        false,
+        &[pin],
+        &[program.as_os_str(), OsStr::new("-c"), OsStr::new(&script)],
+    );
+    wait_until_held(&mut launcher, &program, "directory swap");
+    fs::rename(&bin, dir.path().join("bin.other")).unwrap();
+    fs::rename(&kept, &bin).unwrap();
+    assert_eq!(
+        pin_of(&program, 0, true),
+        pin,
+        "the path names the pinned file again, unchanged"
+    );
+    launcher.release();
+    let error = launcher.error_bytes();
+    let captured = launcher.finish();
+    assert_eq!(
+        exec_report(&error),
+        (Some(libc::ESTALE), true),
+        "{captured:?}"
+    );
+    assert!(!marker.exists(), "the file the descriptor held ran");
+}
+
+/// Review F5: the open is `O_PATH`. A program
+/// replaced by a FIFO is opened without blocking (an `O_PATH` open never
+/// waits for a writer) and refused as changed after the release.
+#[test]
+fn a_program_replaced_by_a_fifo_is_refused_without_blocking() {
+    let dir = temp_dir("pin-fifo");
+    let program = dir.path().join("agent");
+    elf_shell(&program);
+    let pin = pin_of(&program, 0, true);
+    fs::remove_file(&program).unwrap();
+    let c_program = std::ffi::CString::new(program.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a live NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c_program.as_ptr(), 0o755) }, 0);
+    let mut launcher = spawn_pinned_launcher(false, &[pin], &[program.as_os_str()]);
+    wait_until_held(&mut launcher, &program, "fifo");
+    launcher.release();
+    let error = launcher.error_bytes();
+    let captured = launcher.finish();
+    assert_eq!(
+        exec_report(&error),
+        (Some(libc::ESTALE), true),
+        "{captured:?}"
+    );
+}
+
 #[test]
 fn a_launcher_given_a_closed_descriptor_refuses_as_a_usage_error() {
     let captured = exec::run_captured(

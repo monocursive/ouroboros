@@ -2515,3 +2515,81 @@ fn review_fix_an_interrupted_credential_set_restores_echo() {
     assert!(!fixture.config.join("credentials/first").exists());
     drop(master);
 }
+
+// ---------------------------------------------------------------------------
+// Review F5: the supervisor's side of the launcher's own check
+// ---------------------------------------------------------------------------
+
+/// The platform is handed the pins resolution recorded, each at the index
+/// its executable takes in the argv the platform executes.
+#[test]
+fn f5_the_platform_is_handed_the_pins_resolution_recorded() {
+    use ukai_jail::platform::ExecPin;
+    let fixture = Fixture::new();
+    fixture.credential("first", b"token-value");
+    type Seen = Arc<Mutex<Option<(Vec<ExecPin>, Vec<Vec<u8>>)>>>;
+    let seen: Seen = Arc::default();
+    let platform = {
+        let seen = Arc::clone(&seen);
+        platform().on_prepare(move |plan| {
+            *seen.lock().unwrap() = Some((plan.exec_pins.clone(), plan.argv.clone()));
+        })
+    };
+    let report = fixture.run(platform, &fixture.repo, &["agent", "-p", "x"]);
+    assert!(report.error.is_none(), "{:?}", report.error);
+    let (pins, argv) = seen.lock().unwrap().take().expect("prepared");
+    let program = fixture.bin.join("agent");
+    let meta = std::fs::symlink_metadata(&program).unwrap();
+    assert_eq!(
+        pins,
+        [ExecPin {
+            index: 0,
+            by_descriptor: true,
+            identity: (meta.dev(), meta.ino()),
+            size: meta.size(),
+            mtime: (meta.mtime(), meta.mtime_nsec()),
+            ctime: (meta.ctime(), meta.ctime_nsec()),
+            nlink: meta.nlink(),
+            mode: meta.mode() & 0o7777,
+        }]
+    );
+    assert_eq!(argv[0], program.as_os_str().as_bytes());
+}
+
+/// A launcher that refused a changed program (`ESTALE` with its detail) is
+/// a `policy_widening` refusal at `--from-path`, exit 125; the same errno
+/// without the detail is the ordinary exec failure, at no key.
+#[test]
+fn f5_a_changed_program_is_policy_widening_at_from_path() {
+    use ukai_jail::platform::{ExecFailureDetail, RunEvent};
+    for detail in [Some(ExecFailureDetail::ProgramChanged), None] {
+        let fixture = Fixture::new();
+        fixture.credential("first", b"token-value");
+        let platform = platform().events([RunEvent::ExecError {
+            errno: "ESTALE".into(),
+            detail,
+        }]);
+        let report = fixture.run(platform, &fixture.repo, &["agent", "-p", "x"]);
+        let error = report.error.as_ref().expect("a refusal");
+        assert_eq!(report.exit_code, 125, "{error}");
+        let receipt = receipt(&report);
+        let outcome = &receipt["outcome"];
+        assert_eq!(outcome["kind"], "exec_error", "{outcome:#}");
+        assert_eq!(outcome["cause"], "ESTALE", "{outcome:#}");
+        if detail.is_some() {
+            assert_eq!(error.code, ErrorCode::PolicyWidening, "{error}");
+            assert_eq!(error.key_path.as_deref(), Some("--from-path"), "{error}");
+            assert!(
+                error
+                    .message
+                    .contains("changed between the recheck before release"),
+                "{error}"
+            );
+            assert_eq!(outcome["error"]["code"], "policy_widening", "{outcome:#}");
+            assert_eq!(outcome["error"]["key_path"], "--from-path", "{outcome:#}");
+        } else {
+            assert_eq!(error.code, ErrorCode::ExecFailed, "{error}");
+            assert_eq!(error.key_path, None, "{error}");
+        }
+    }
+}

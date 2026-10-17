@@ -839,58 +839,81 @@ the code is stricter than §3 the text above still describes the intent.
     program in place. A root-owned file with several names is accepted (a
     non-root operator's agent cannot write it). The recheck before release
     also compares size, modification and change times and the link count.
-20. **The window §3.3 step 3 leaves, closed for ELF programs** (review F5).
-    The recheck before release covers resolution up to the release. After
-    the release, as the last thing before the exec, the launcher checks every
-    pinned executable again against what resolution recorded: `(dev, ino)`,
-    size, modification and change times, link count and mode (its `--pin`
-    options). Not the owner: inside the jail's user namespace a root-owned
-    program's owner reads as the overflow uid, and a `chown` moves the
-    change time anyway; the recheck before release compares it on the host.
-    An ELF file at argv 0 (`E`, or `X'` after an
-    expansion) is opened `O_PATH` by the launcher before the release, checked
-    through that descriptor with `fstat`, and executed through it with
-    `execveat(fd, "", AT_EMPTY_PATH)`, so no rename after the check can
-    choose what runs; the link count and the change time (which no owner
-    can set) catch a file renamed over it, given another name, written in
-    place, `chmod`ed or `chown`ed since resolution. A changed program is
-    refused after
-    the release as an exec error, `outcome.cause` `ESTALE` and
-    `outcome.error.code` `policy_widening` at `--from-path` (exit 125), and
-    nothing is executed; a pinned file the launcher cannot reach is the exec
-    failure an exec by path would have reported. Proved through the CLI
-    under `tool` and `agent` (`--from-path` refuses `none`) by a test seam
+20. **The window §3.3 step 3 leaves, closed for the program's own file
+    when it is ELF** (review F5). The recheck before release covers the
+    program up to the release. After the release, as the last thing before
+    the exec, the launcher checks every pinned executable again against what
+    resolution recorded: `(dev, ino)`, size, modification and change times,
+    link count and mode (its `--pin` options). Not the owner: inside the
+    jail's user namespace a root-owned program's owner reads as the overflow
+    uid, and a `chown` moves the change time anyway; the recheck before
+    release compares the owner on the host.
+    - **An ELF file at argv 0** (`E`, or `X'` after an expansion) is opened
+      `O_PATH` by the launcher before the release, checked through that
+      descriptor, and executed through it with
+      `execveat(fd, "", AT_EMPTY_PATH)`: no rename after the check can make
+      another file the program. The link count and the change time catch a
+      file renamed over it, given another name, written in place, `chmod`ed
+      or `chown`ed since resolution.
+    - **A `#!` script** (`E` run by a system interpreter, or `E` after an
+      expansion) is opened again by its path, by the kernel and then by the
+      interpreter, so it is checked by path immediately before the exec.
+    - A changed program is refused after the release as an exec error:
+      `outcome.cause` `ESTALE`, `outcome.error.code` `policy_widening` at
+      `--from-path`, exit 125, nothing executed. A pinned file the launcher
+      cannot open (before the release) or stat (after it) is refused with
+      that call's errno as an ordinary `exec_failed`, nothing executed.
+
+    Proved on the reference host, through the CLI with a test seam
     (`UKAI_JAIL_TEST_PROGRAM_SWAP`) that holds the supervisor after its
-    recheck while the test renames another file over the program or writes
-    it in place (`from_path_linux.rs`, `f5_*`), and on the launcher directly
-    (`linux_mechanisms.rs`). What remains:
-    - an ELF program written in place by an open, write and close that all
-      fall between the launcher's `fstat` and the kernel's refusal of
-      writers inside `execveat` (two consecutive calls of the launcher). A
-      writer that already holds the file open makes the exec fail with
-      `ETXTBSY`, and no writer can open it while it runs (both observed on
-      the reference host's kernel);
-    - a `#!` script (`E` run by a system interpreter, or `E` after an
-      expansion): the kernel and then the interpreter open it again by its
-      path, so it is checked by path immediately before the exec, and a
-      rename between that check and those opens still wins. The replacement
-      runs contained; a system-interpreter script carries no `@program`
-      credential (item 2), and after an expansion the credential is bound to
-      `X'`, which already admits any script it runs (§3.3 step 7).
+    recheck (`from_path_linux.rs`, `f5_*`): an ELF program renamed over or
+    written in place, and a script renamed over, are refused under `tool`
+    and `agent`; with the program's directory renamed away and another file
+    put at its path after the launcher's open, the pinned program is what
+    runs, and the observer confirms its exec by the pinned inode; a
+    root-owned program runs. On the launcher directly
+    (`linux_mechanisms.rs`): the descriptor is held before the release and
+    not by the target, a directory swapped around the launcher's open is
+    refused, and X04's interpreter-missing detail holds for an exec through
+    the descriptor. What remains:
+    - **Files other than the program.** The pin covers the executable file
+      alone. Its ELF loader (resolution accepts one inside the install root,
+      where §3.3 step 5 says the runtime roots), libraries it loads from the
+      install root (`$ORIGIN`), and anything else it reads from there are
+      opened by path when it runs. A process running as the operator that
+      replaces one of them runs its code inside the pinned process, which a
+      `@program` credential is bound to. This predates F5 and is not closed
+      here.
+    - **A write in place in the last instant:** a write and a close that both
+      fall between the launcher's `fstat` and the kernel's refusal of writers
+      inside `execveat` (two consecutive calls of the launcher). A writer
+      still holding the file open then makes the exec fail with `ETXTBSY`,
+      and no writer can open the file while it runs (both checked by hand on
+      the reference host, kernel 7.0).
+    - **Coarse change times:** where the kernel or filesystem keeps change
+      times at clock-tick granularity, a same-size write within the same
+      tick as the file's previous change leaves size and times unchanged.
+      This bounds the recheck before release as much as the launcher's
+      check.
+    - **A script** renamed over, or a directory above it renamed, between
+      its check by path and the kernel's or the interpreter's open. The
+      replacement runs contained; a system-interpreter script carries no
+      `@program` credential (item 2), and after an expansion the credential
+      is bound to `X'`, which already admits any script it runs (§3.3
+      step 7).
 
     The exec of a pinned ELF program is recorded as the call it is: the
     audit's `proc.exec` names `execveat` with an empty path
-    (`{kind: unavailable, reason: empty_path}`) and `path_dirfd`. The
-    observer confirms it by the kernel's image being the pinned inode, which
-    holds even when a rename has given the program's path another file
-    since. The program can tell: its `AT_EXECFN` is `/dev/fd/N`, not its
-    path (argv 0 and `/proc/self/exe` are unchanged; `linux_mechanisms.rs`
-    shows it under `LD_SHOW_AUXV`). A program that names itself from
-    `AT_EXECFN` sees a descriptor number: on the reference host uutils'
-    multi-call coreutils then refuses to run ("unknown program '4'"). There
-    `/proc/PID/comm` is the file's name (kernel 7.0); older kernels are
-    reported to name a process executed this way after the descriptor
-    number (not checked here).
+    (`{kind: unavailable, reason: empty_path}`) and `path_dirfd` (the
+    `f5_*` test checks the call and the path). The program can tell it was
+    executed this way: its `AT_EXECFN` is `/dev/fd/N`, not its path (argv 0
+    and `/proc/self/exe` are unchanged; `linux_mechanisms.rs` shows it under
+    `LD_SHOW_AUXV`). A program that names itself from `AT_EXECFN` sees a
+    descriptor number: on the reference host, uutils' multi-call coreutils
+    then refuses to run ("unknown program '4'", checked by hand), and
+    `/proc/PID/comm` is the file's name there; older kernels are reported
+    to name a process executed this way after the descriptor number (not
+    checked here).
 21. **The home refusal also compares identities** (review F4): a workspace or
     install root that is the home, `/` or an ancestor of the home by
     `(dev, ino)` refuses, so a bind-mount alias of the home does too.

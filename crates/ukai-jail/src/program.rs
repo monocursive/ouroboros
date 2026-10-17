@@ -1463,6 +1463,35 @@ mod tests {
         assert_eq!(argv[1], expanded.program.path.as_os_str().as_bytes());
     }
 
+    /// Review F5: every field of a pin is the executable's own. A fixture's file has one link and mode 0755, so
+    /// a constant `nlink: 1` or `mode: 0o755` would otherwise pass.
+    #[test]
+    fn an_exec_pin_copies_every_recorded_field() {
+        let (_dir, root) = tree();
+        let bin = root.join("bin");
+        executable(&bin.join("elf"), &static_elf());
+        let mut program = resolve("elf", Some(&path_of(&[&bin])), 1).unwrap().program;
+        program.stat.dev = 11;
+        program.stat.ino = 12;
+        program.stat.size = 13;
+        program.stat.mtime = (14, 15);
+        program.stat.ctime = (16, 17);
+        program.stat.nlink = 3;
+        program.stat.mode = 0o4711;
+        let pin = program.exec_pin(0);
+        assert_eq!(
+            (
+                pin.identity,
+                pin.size,
+                pin.mtime,
+                pin.ctime,
+                pin.nlink,
+                pin.mode
+            ),
+            ((11, 12), 13, (14, 15), (16, 17), 3, 0o4711)
+        );
+    }
+
     /// Kills: `shebang` accepting an `env` option word, or an assignment,
     /// as the interpreter name when a file of that name exists on PATH.
     #[test]

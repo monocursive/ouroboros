@@ -433,7 +433,10 @@ fn parse_pin(raw: &OsString) -> Result<crate::platform::ExecPin, LaunchUsage> {
         mtime: (signed(mtime)?, signed(mtime_ns)?),
         ctime: (signed(ctime)?, signed(ctime_ns)?),
         nlink: unsigned(nlink)?,
-        mode: u32::from_str_radix(mode, 8).map_err(|_| bad())?,
+        mode: u32::from_str_radix(mode, 8)
+            .ok()
+            .filter(|mode| *mode <= 0o7777)
+            .ok_or_else(bad)?,
     })
 }
 
@@ -1410,6 +1413,7 @@ mod tests {
             "0,exec,1,2,3,4,5,6,7,8,755",
             "0,fd,-1,2,3,4,5,6,7,8,755",
             "0,fd,1,2,3,4,5,6,7,8,758",
+            "0,fd,1,2,3,4,5,6,7,8,10755",
             "x,fd,1,2,3,4,5,6,7,8,755",
             "",
         ] {
@@ -1446,6 +1450,7 @@ mod tests {
         let c_file = CString::new(file.as_os_str().as_bytes()).unwrap();
         // SAFETY: a live path and a writable stack buffer.
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: as above.
         assert_eq!(unsafe { libc::stat(c_file.as_ptr(), &raw mut stat) }, 0);
         let recorded = crate::state::anchored::fstat(std::os::fd::AsFd::as_fd(
             &std::fs::File::open(&file).unwrap(),

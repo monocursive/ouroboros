@@ -984,6 +984,34 @@ mod tests {
         assert!(run.target_exit_seen, "the end is still known");
     }
 
+    /// Review F5: the pinned identity reaches the observer's target, so the launcher's exec whose kernel image is the
+    /// pinned inode confirms although no candidate path names it.
+    #[test]
+    fn the_pinned_image_confirms_the_launchers_exec() {
+        let exec = |pid| TracerEvent::Exec {
+            pid,
+            start_ticks: None,
+            syscall: None,
+            path: None,
+            kernel_image: Some(super::super::tracer::KernelImage {
+                path: b"/opt/agent/bin/agent (deleted)".to_vec(),
+                identity: Some((7, 70)),
+                candidates: Vec::new(),
+            }),
+            dirfd: None,
+            command: None,
+            shebangs: Vec::new(),
+            kernel_argv: None,
+        };
+        let mut unpinned = run_state();
+        assert_eq!(unpinned.record(&exec(unpinned.launcher.pid)), None);
+        assert_eq!(unpinned.pending.pop_front(), None);
+        let mut pinned = run_state();
+        pinned.pinned_image = Some((7, 70));
+        assert_eq!(pinned.record(&exec(pinned.launcher.pid)), None);
+        assert_eq!(pinned.pending.pop_front(), Some(RunEvent::ExecConfirmed));
+    }
+
     #[test]
     fn wrong_guess_trace_stops_are_counted_in_the_receipts_native_details() {
         // The receipt carries the counter, or null when no observer ran, so a

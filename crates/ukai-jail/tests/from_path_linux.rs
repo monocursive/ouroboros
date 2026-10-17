@@ -881,6 +881,13 @@ fn f5_an_elf_program_changed_after_the_recheck_is_refused_not_run() {
                     .find(|event| event["operation"] == "proc.exec")
                     .unwrap_or_else(|| panic!("{label}: no exec in {journal:#?}"));
                 assert_eq!(first["fields"]["syscall"], "execveat", "{label}: {first:#}");
+                // The call's own path: empty, at the descriptor.
+                assert_eq!(
+                    first["fields"]["path"],
+                    serde_json::json!({"kind": "unavailable", "reason": "empty_path"}),
+                    "{label}: {first:#}"
+                );
+                assert!(first["fields"]["path_dirfd"].is_i64(), "{label}: {first:#}");
             } else {
                 assert_refused_as_changed(&live, &output, &format!("{name}-{change:?}"));
             }
@@ -947,13 +954,106 @@ fn f5_a_script_renamed_over_after_the_recheck_is_refused_not_run() {
     if !common::live() {
         return;
     }
+    for jail in ["tool", "agent"] {
+        let live = Live::new();
+        let name = format!("f5script{jail}");
+        live.profile(&name, &format!("name = \"{name}\"\njail = \"{jail}\"\n"));
+        write(
+            &live.bin.join(&name),
+            b"#!/bin/sh\necho pinned-ran\n",
+            0o755,
+        );
+        let output = run_with_change(&live, &name, &[], Change::RenamedOver);
+        assert_refused_as_changed(&live, &output, &format!("{name}-RenamedOver"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Review F5: the pinned program runs although its path names another file
+// ---------------------------------------------------------------------------
+
+/// Whether a launcher (a process whose command line holds `__launch`) holds
+/// `path` open. The supervisor's own handle on the program is not one: its
+/// command line is the operator's.
+fn a_launcher_holds(path: &Path) -> bool {
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    processes.filter_map(Result::ok).any(|process| {
+        let launcher = std::fs::read(process.path().join("cmdline"))
+            .is_ok_and(|cmdline| contains(&cmdline, b"\0__launch\0"));
+        launcher
+            && std::fs::read_dir(process.path().join("fd")).is_ok_and(|fds| {
+                fds.filter_map(Result::ok)
+                    .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|target| target == path))
+            })
+    })
+}
+
+/// Review F5, through the CLI. With the install root two levels up, the directory holding the
+/// program is renamed away after the recheck and the launcher's open, and
+/// another file takes the program's path inside the bound root. A rename
+/// of its directory leaves the program unchanged, so the launcher's
+/// descriptor passes its check and the pinned program runs, not the file
+/// the path names now; the observer confirms that exec by the pinned inode
+/// alone, since no candidate path names it.
+#[test]
+fn f5_the_pinned_program_runs_though_its_path_names_another_file() {
+    if !common::live() {
+        return;
+    }
     let live = Live::new();
-    live.profile("f5script", "name = \"f5script\"\njail = \"tool\"\n");
+    let name = "f5moved";
+    let package = live.root.join("tools/pkg");
+    let current = package.join("current");
+    mkdir(&current, 0o755);
+    let program = current.join(name);
+    std::fs::copy(Path::new("/bin/sh").canonicalize().unwrap(), &program).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&program, live.bin.join(name)).unwrap();
+    live.profile(
+        name,
+        &format!("name = \"{name}\"\njail = \"tool\"\nprogram_root = 2\n"),
+    );
+    let seam = live.root.join("seam");
+    mkdir(&seam, 0o700);
+    let child = live
+        .command(&live.repo, &[os(name), os("-c"), os("echo pinned-ran")])
+        .env(ukai_jail::program::SWAP_SEAM, &seam)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    common::eventually(
+        "the supervisor past its recheck before release",
+        Duration::from_secs(60),
+        || seam.join("rechecked").exists(),
+    );
+    common::eventually(
+        "the launcher's descriptor on the program",
+        Duration::from_secs(30),
+        || a_launcher_holds(&program),
+    );
+    std::fs::rename(&current, package.join("moved")).unwrap();
+    mkdir(&current, 0o755);
     write(
-        &live.bin.join("f5script"),
-        b"#!/bin/sh\necho pinned-ran\n",
+        &current.join(name),
+        format!(
+            "#!/bin/sh\necho swapped > {}\necho swapped\n",
+            live.repo.join("swapped-ran").display()
+        )
+        .as_bytes(),
         0o755,
     );
-    let output = run_with_change(&live, "f5script", &[], Change::RenamedOver);
-    assert_refused_as_changed(&live, &output, "f5script-RenamedOver");
+    write(&seam.join("go"), b"", 0o600);
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", report(&output));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "pinned-ran\n");
+    assert!(
+        !live.repo.join("swapped-ran").exists(),
+        "the replacement ran"
+    );
+    let receipt = live.receipt();
+    assert_eq!(receipt["phase"], "settled", "{receipt:#}");
+    assert_eq!(receipt["exec_observed"], true, "{receipt:#}");
 }
