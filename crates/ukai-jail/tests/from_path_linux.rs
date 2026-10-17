@@ -990,13 +990,15 @@ fn a_launcher_holds(path: &Path) -> bool {
     })
 }
 
-/// Review F5, through the CLI. With the install root two levels up, the directory holding the
-/// program is renamed away after the recheck and the launcher's open, and
-/// another file takes the program's path inside the bound root. A rename
-/// of its directory leaves the program unchanged, so the launcher's
-/// descriptor passes its check and the pinned program runs, not the file
-/// the path names now; the observer confirms that exec by the pinned inode
-/// alone, since no candidate path names it.
+/// Review F5, through the CLI. With the install root two levels up, the
+/// directory holding the program is renamed away after the recheck and the
+/// launcher's open, and another file takes the program's path inside the
+/// bound root. A rename of its directory leaves the program unchanged, so
+/// the launcher's descriptor passes its check and the pinned program runs,
+/// not the file the path names now. The observer confirms that exec by the
+/// pinned inode alone, since no candidate path names it, and does so at the
+/// exec: the receipt reaches `enforced` while the program still waits (its
+/// observed exit would otherwise confirm it only at the end).
 #[test]
 fn f5_the_pinned_program_runs_though_its_path_names_another_file() {
     if !common::live() {
@@ -1018,7 +1020,14 @@ fn f5_the_pinned_program_runs_though_its_path_names_another_file() {
     let seam = live.root.join("seam");
     mkdir(&seam, 0o700);
     let child = live
-        .command(&live.repo, &[os(name), os("-c"), os("echo pinned-ran")])
+        .command(
+            &live.repo,
+            &[
+                os(name),
+                os("-c"),
+                os("while [ ! -e release-target ]; do sleep 0.05; done; echo pinned-ran"),
+            ],
+        )
         .env(ukai_jail::program::SWAP_SEAM, &seam)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1046,6 +1055,17 @@ fn f5_the_pinned_program_runs_though_its_path_names_another_file() {
         0o755,
     );
     write(&seam.join("go"), b"", 0o600);
+    common::eventually(
+        "the exec confirmed while the program runs",
+        Duration::from_secs(30),
+        || {
+            std::fs::read(live.attempt().join("jail.json")).is_ok_and(|bytes| {
+                serde_json::from_slice::<Value>(&bytes)
+                    .is_ok_and(|receipt| receipt["phase"] == "enforced")
+            })
+        },
+    );
+    write(&live.repo.join("release-target"), b"", 0o644);
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(0), "{}", report(&output));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "pinned-ran\n");
