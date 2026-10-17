@@ -17,6 +17,10 @@ pub const DT_RUNPATH: u64 = 29;
 pub const DT_AUDIT: u64 = 0x6fff_fefc;
 /// `DT_DEPAUDIT`: `rtld-audit` libraries for dependencies, colon-separated.
 pub const DT_DEPAUDIT: u64 = 0x6fff_fefb;
+/// `DT_AUXILIARY`: an auxiliary filter library name.
+pub const DT_AUXILIARY: u64 = 0x7fff_fffd;
+/// `DT_FILTER`: a filter library name.
+pub const DT_FILTER: u64 = 0x7fff_ffff;
 
 /// Where the image's one `PT_LOAD` maps offset 0.
 pub const BASE: u64 = 0x10_000;

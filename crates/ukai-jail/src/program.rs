@@ -909,6 +909,8 @@ const DT_RPATH: u64 = 15;
 const DT_RUNPATH: u64 = 29;
 const DT_DEPAUDIT: u64 = 0x6fff_fefb;
 const DT_AUDIT: u64 = 0x6fff_fefc;
+const DT_AUXILIARY: u64 = 0x7fff_fffd;
+const DT_FILTER: u64 = 0x7fff_ffff;
 /// The largest dynamic section read (4096 64-bit entries).
 const ELF_DYNAMIC_MAX: u64 = 64 * 1024;
 /// The longest dynamic string read.
@@ -919,8 +921,9 @@ const ELF_STRING_MAX: u64 = 64 * 1024;
 struct Elf {
     /// The `PT_INTERP` path, absent for a static executable.
     loader: Option<PathBuf>,
-    /// Every `DT_NEEDED`, `DT_RPATH`, `DT_RUNPATH`, `DT_AUDIT` and
-    /// `DT_DEPAUDIT` string before `DT_NULL`, with its tag, in table order.
+    /// Every `DT_NEEDED`, `DT_FILTER`, `DT_AUXILIARY`, `DT_RPATH`,
+    /// `DT_RUNPATH`, `DT_AUDIT` and `DT_DEPAUDIT` string before `DT_NULL`,
+    /// with its tag, in table order.
     libraries: Vec<(u64, Vec<u8>)>,
 }
 
@@ -1052,7 +1055,8 @@ fn elf_headers(file: &File, head: &[u8]) -> Result<Elf, String> {
             DT_NULL => break,
             DT_STRTAB => strtab = Some(value),
             DT_STRSZ => strsz = Some(value),
-            DT_NEEDED | DT_RPATH | DT_RUNPATH | DT_AUDIT | DT_DEPAUDIT => {
+            DT_NEEDED | DT_FILTER | DT_AUXILIARY | DT_RPATH | DT_RUNPATH | DT_AUDIT
+            | DT_DEPAUDIT => {
                 named.push((tag, value));
             }
             _ => {}
@@ -1127,10 +1131,12 @@ fn check_loader(executable: &Executable, loader: Option<&Path>) -> Result<(), Ja
 ///   reach only the runtime roots. An empty or relative entry (searched from
 ///   the working directory) refuses, and so does one holding another `$`
 ///   token (`$LIB`, `$PLATFORM`), whose value this resolution does not know;
-/// - a library name with a `/` (`DT_NEEDED`, or one of the colon-separated
-///   `DT_AUDIT` and `DT_DEPAUDIT` names) is opened as that path: it must be
-///   absolute, hold no `$` (loaders disagree on expanding one there) and
-///   reach only the runtime roots. A name without a `/` is searched for on
+/// - a library name (`DT_NEEDED`, `DT_FILTER`, `DT_AUXILIARY`, or one of
+///   the colon-separated `DT_AUDIT` and `DT_DEPAUDIT` names) with a `/` is
+///   opened as that path: it must be absolute and reach only the runtime
+///   roots. One holding a `$` refuses wherever the `$` is: glibc expands a
+///   token there before deciding whether the name is a path (`${ORIGIN}x`
+///   becomes one), musl never does. A name with neither is searched for on
 ///   the path checked here and in the system's own directories.
 fn check_libraries(executable: &Executable, libraries: &[(u64, Vec<u8>)]) -> Result<(), JailError> {
     let origin = executable.path.parent().unwrap_or(Path::new("/"));
@@ -1139,6 +1145,8 @@ fn check_libraries(executable: &Executable, libraries: &[(u64, Vec<u8>)]) -> Res
             DT_NEEDED => "DT_NEEDED",
             DT_RPATH => "DT_RPATH",
             DT_RUNPATH => "DT_RUNPATH",
+            DT_FILTER => "DT_FILTER",
+            DT_AUXILIARY => "DT_AUXILIARY",
             DT_AUDIT => "DT_AUDIT",
             _ => "DT_DEPAUDIT",
         };
@@ -1185,15 +1193,20 @@ fn check_libraries(executable: &Executable, libraries: &[(u64, Vec<u8>)]) -> Res
             }
             continue;
         }
-        let names: Vec<&[u8]> = if *tag == DT_NEEDED {
-            vec![value.as_slice()]
-        } else {
+        let names: Vec<&[u8]> = if matches!(*tag, DT_AUDIT | DT_DEPAUDIT) {
             value.split(|byte| *byte == b':').collect()
+        } else {
+            vec![value.as_slice()]
         };
-        for name in names.into_iter().filter(|name| name.contains(&b'/')) {
+        for name in names {
             let shown = String::from_utf8_lossy(name);
             if name.contains(&b'$') {
-                return Err(refuse(format!("the library `{shown}` holds a `$` token")));
+                return Err(refuse(format!(
+                    "the library `{shown}` holds a `$`, which glibc may expand into a path"
+                )));
+            }
+            if !name.contains(&b'/') {
+                continue;
             }
             if name.first() != Some(&b'/') {
                 return Err(refuse(format!(
@@ -2149,7 +2162,8 @@ mod tests {
         let image = Image::new()
             .interp(SYSTEM_FILE)
             .entry(elf::DT_NEEDED, "libc.so.6")
-            .entry(elf::DT_NEEDED, "lib$weird.so")
+            .entry(elf::DT_FILTER, "libfilter.so")
+            .entry(elf::DT_AUXILIARY, "/usr/lib/ukai-auxiliary.so")
             .entry(elf::DT_NEEDED, "/usr/lib/ukai-no-such-library.so")
             .entry(elf::DT_RUNPATH, "/usr/lib:/bin:/usr/lib/../bin/")
             .entry(elf::DT_RPATH, "/usr/ukai-no-such-directory/lib")
@@ -2160,10 +2174,12 @@ mod tests {
         assert_eq!(program.format.as_str(), "elf");
     }
 
-    /// Kills: each refusal of a library name with a `/`, in `DT_NEEDED`
-    /// and in each colon-separated `DT_AUDIT` and `DT_DEPAUDIT` name: a
-    /// `$` token (musl opens it unexpanded, from the working directory), a
-    /// relative name and an absolute one outside the runtime roots.
+    /// Kills: each refusal of a library name, in `DT_NEEDED`, `DT_FILTER`,
+    /// `DT_AUXILIARY` and each colon-separated `DT_AUDIT` and `DT_DEPAUDIT`
+    /// name: a `$`, with or without a `/` (glibc expands `${ORIGIN}x` into
+    /// a path; musl opens `$ORIGIN/x` unexpanded, from the working
+    /// directory), a relative name with a `/` and an absolute one outside
+    /// the runtime roots.
     #[test]
     fn review_f2_a_library_named_by_a_path_outside_the_runtime_roots_refuses() {
         let (_dir, root) = tree();
@@ -2174,7 +2190,37 @@ mod tests {
                 elf::DT_NEEDED,
                 "DT_NEEDED",
                 "$ORIGIN/libx.so".to_owned(),
-                "`$` token",
+                "holds a `$`",
+            ),
+            (
+                elf::DT_NEEDED,
+                "DT_NEEDED",
+                "${ORIGIN}x.so".to_owned(),
+                "holds a `$`",
+            ),
+            (
+                elf::DT_NEEDED,
+                "DT_NEEDED",
+                "lib$weird.so".to_owned(),
+                "holds a `$`",
+            ),
+            (
+                elf::DT_FILTER,
+                "DT_FILTER",
+                outside.to_owned(),
+                "outside the runtime roots",
+            ),
+            (
+                elf::DT_AUXILIARY,
+                "DT_AUXILIARY",
+                "x/y.so".to_owned(),
+                "relative library",
+            ),
+            (
+                elf::DT_AUDIT,
+                "DT_AUDIT",
+                "liba.so:$ORIGIN".to_owned(),
+                "holds a `$`",
             ),
             (
                 elf::DT_NEEDED,

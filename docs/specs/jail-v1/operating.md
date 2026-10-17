@@ -536,8 +536,9 @@ With `--from-path` (which the alias implies):
   each `DT_RPATH` and `DT_RUNPATH` entry, `$ORIGIN` expanded to the program's
   own directory, and each library named by a path. An entry outside the
   runtime roots (`$ORIGIN` in an install root), an empty or relative one
-  (searched from the working directory, the repository), and one holding
-  `$LIB` or `$PLATFORM` refuse (`policy_widening`, naming the entry): the
+  (searched from the working directory, the repository), one holding
+  `$LIB` or `$PLATFORM`, and a library name holding a `$` refuse
+  (`policy_widening`, naming the entry): the
   loader opens those files by path, outside the pin;
   a `#!` interpreter in the runtime roots needs nothing more, and neither does
   `#!/usr/bin/env X` when `X` resolves inside them. When `X` resolves outside

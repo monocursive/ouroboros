@@ -942,20 +942,23 @@ the code is stricter than §3 the text above still describes the intent.
       the `PT_LOAD` segments (not at `PT_DYNAMIC`'s file offset), up to
       `DT_NULL`. Every `DT_RPATH` and `DT_RUNPATH` entry, with `$ORIGIN`
       expanded to the program's own directory (what `/proc/self/exe` names
-      inside), and every library named by a path in `DT_NEEDED`, `DT_AUDIT`
-      or `DT_DEPAUDIT`, must reach only the runtime roots. A name without a
-      `/` is searched for on that path and in the system's directories.
+      inside), and every library named by a path in `DT_NEEDED`,
+      `DT_FILTER`, `DT_AUXILIARY`, `DT_AUDIT` or `DT_DEPAUDIT`, must reach
+      only the runtime roots. A name with neither a `/` nor a `$` is
+      searched for on that path and in the system's directories.
       Refused, `policy_widening` at `--from-path`, naming the program, the
       tag and the entry: an entry that leaves the runtime roots (so any
       `$ORIGIN` entry of a program in an install root); an empty or relative
       entry, which the loader searches from the working directory, inside
       the repository the agent writes; an entry with another `$` token
-      (`$LIB`, `$PLATFORM`), whose value resolution does not know; and a
-      library path that is relative or holds a `$` (musl opens it
-      unexpanded). A dynamic section the loader could not use (outside the
-      loaded segments, a string outside its table, two `PT_DYNAMIC`
-      headers) refuses as `invalid_config`. The check runs whether or not
-      the file names a loader.
+      (`$LIB`, `$PLATFORM`), whose value resolution does not know; a
+      library name holding a `$` anywhere (glibc expands a token there
+      before deciding whether the name is a path, so `${ORIGIN}x` becomes
+      one; musl never expands it); and a relative library path. A dynamic
+      section the loader could not use (outside the loaded segments, a
+      string outside its table, two `PT_DYNAMIC` headers) refuses as
+      `invalid_config`. The check runs whether or not the file names a
+      loader.
     - **Why refuse rather than pin those libraries:** the loader opens them
       by path after the exec, which no descriptor the launcher holds can
       govern, so a pin would narrow that window, not close it. The refusal
