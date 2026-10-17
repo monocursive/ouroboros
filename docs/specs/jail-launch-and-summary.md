@@ -878,10 +878,11 @@ the code is stricter than §3 the text above still describes the intent.
     the descriptor. What remains:
     - **Files other than the program.** The pin covers the executable file
       alone; whatever else the program runs is opened by path. Since review
-      F2 of this fix (item 24), its ELF loader and every library the dynamic
-      loader can open at startup must come from the runtime roots, so none
-      of them is a file in the install root. Files it opens once it runs
-      remain (item 24).
+      F2 of this fix (item 24), its ELF loader, and every place its dynamic
+      section lets the loader open a library from, must lie in the runtime
+      roots where only root can change them. What the loader takes from the
+      system's own directories and configuration, and files the program
+      opens once it runs, remain (item 24).
     - **A write in place in the last instant:** a write and a close that both
       fall between the launcher's `fstat` and the kernel's refusal of writers
       inside `execveat` (two consecutive calls of the launcher). A writer
@@ -922,43 +923,64 @@ the code is stricter than §3 the text above still describes the intent.
     not apply.
 23. **`credential set` restores the terminal on a signal** (review I3):
     Ctrl-C, TERM, HUP or QUIT puts echo back before the process ends.
-24. **The loader and the library search path stay in the runtime roots**
-    (review F2 of the F5 fix, 2026-10-17). The kernel opens an ELF
-    program's loader by path at the exec, and the loader opens its libraries
-    by path, so a file in the install root that a process running as the
-    operator replaces would run inside the pinned program, which a
-    `@program` credential is bound to. J12 accepted a loader inside the
-    install root and did not look at libraries.
-    - **§3.3 step 5 is enforced as written:** the loader must lie in the
-      runtime roots (`/usr`, `/bin`, `/lib`, `/lib64`), judged by every
-      location the kernel's resolution of `PT_INTERP` passes through,
-      including where it ends. A loader in the install root, a link outside
-      the runtime roots to a system loader, and a `..` that climbs out of
-      them refuse, `exec_interpreter_missing`, though the last two end
-      inside: inside the jail such a path names something else or nothing.
-    - **The library search path is held to the same rule.** The dynamic
+24. **The loader and the library search path stay in the runtime roots,
+    where only root can change them** (review F2 of the F5 fix,
+    2026-10-17). The kernel opens an ELF program's loader by path at the
+    exec, and the loader opens its libraries by path, so a file a process
+    running as the operator replaces there would run inside the pinned
+    program, which a `@program` credential is bound to. J12 accepted a
+    loader inside the install root and did not look at libraries.
+    - **One rule for every such path** (`program::reach_in_runtime_roots`):
+      followed as the kernel follows it (links, `..` after the link before
+      it, at most 40 links), every location it passes through and the one
+      it ends at must lie in the runtime roots (`/usr`, `/bin`, `/lib`,
+      `/lib64`, which every contained profile binds read-only at their own
+      paths), and every one of them, `/` included, must be owned by root
+      and writable by neither its group nor others (a link's own mode
+      aside: replacing a link takes a write to its directory). A path that
+      ends at a missing name, a file used as a directory or a link loop
+      inside them names nothing there; any other resolution error refuses.
+      So a location in an install root, in a child-writable root, in the
+      working directory, or in a directory under `/usr` that the operator
+      owns (a chowned `/usr/local`) or a group can write, refuses.
+    - **§3.3 step 5 is enforced as written:** the loader (`PT_INTERP`) must
+      pass that rule. A loader in an install root outside `/usr`, a link
+      outside the runtime roots to a system loader, and a `..` that leads
+      outside them refuse with `exec_interpreter_missing`, as do a missing
+      loader and one that cannot be followed: inside the jail such a path
+      names something else or nothing. A loader in the runtime roots that
+      someone other than root could replace refuses with `policy_widening`.
+    - **The library search path passes the same rule.** The dynamic
       section of the pinned ELF file (`E`, or `X'` after an expansion) is
       read as the dynamic loader reads it: at its address, mapped through
       the `PT_LOAD` segments (not at `PT_DYNAMIC`'s file offset), up to
-      `DT_NULL`. Every `DT_RPATH` and `DT_RUNPATH` entry, with `$ORIGIN`
-      expanded to the program's own directory (what `/proc/self/exe` names
-      inside), and every library named by a path in `DT_NEEDED`,
-      `DT_FILTER`, `DT_AUXILIARY`, `DT_AUDIT` or `DT_DEPAUDIT`, must reach
-      only the runtime roots. A name with neither a `/` nor a `$` is
-      searched for on that path and in the system's directories.
-      Refused, `policy_widening` at `--from-path`, naming the program, the
-      tag and the entry: an entry that leaves the runtime roots (so any
-      `$ORIGIN` entry of a program in an install root); an empty or relative
-      entry, which the loader searches from the working directory, inside
-      the repository the agent writes; an entry with another `$` token
-      (`$LIB`, `$PLATFORM`), whose value resolution does not know; a
-      library name holding a `$` anywhere (glibc expands a token there
-      before deciding whether the name is a path, so `${ORIGIN}x` becomes
-      one; musl never expands it); and a relative library path. A dynamic
-      section the loader could not use (outside the loaded segments, a
-      string outside its table, two `PT_DYNAMIC` headers) refuses as
-      `invalid_config`. The check runs whether or not the file names a
-      loader.
+      `DT_NULL`. Every `DT_RPATH` and `DT_RUNPATH` entry (separated by `:`,
+      and by a newline as musl does), with `$ORIGIN` expanded to the
+      program's own directory (what `/proc/self/exe` names inside), and
+      every library named by a path in `DT_NEEDED`, `DT_FILTER`,
+      `DT_AUXILIARY`, `DT_AUDIT` or `DT_DEPAUDIT` must pass it. A name with
+      neither a `/` nor a `$` is searched for on that path and in the
+      system's own directories. Refused, `policy_widening` at
+      `--from-path`, naming the program, the tag and the entry: an entry or
+      library path that fails the rule (so any `$ORIGIN` entry of a program
+      in an install root the operator owns); an empty entry, which glibc
+      searches as the working directory, and a relative one, searched from
+      the working directory, inside the repository the agent writes; an
+      entry with another `$` token (`$LIB`, `$PLATFORM`), whose value
+      resolution does not know; a library name holding a `$` anywhere
+      (glibc expands a token there before deciding whether the name is a
+      path, so `${ORIGIN}x` becomes one; musl never expands it); and a
+      relative library path. The check runs whether or not the file names
+      a loader, and follows each distinct path once.
+    - **Headers this check would read otherwise than a loader** refuse as
+      `invalid_config`: a dynamic section or string table outside the
+      loaded segments, a string outside its table, a table with no
+      `DT_NULL` within its size (the loaders read on), several `PT_INTERP`
+      headers (the kernel opens the first; musl names itself after the
+      last) or several `PT_DYNAMIC` headers (glibc reads the last), a
+      program header size other than the kernel's, and more than 1 MiB of
+      library names and search paths in all (real programs hold a few
+      hundred bytes).
     - **Why refuse rather than pin those libraries:** the loader opens them
       by path after the exec, which no descriptor the launcher holds can
       govern, so a pin would narrow that window, not close it. The refusal
@@ -967,34 +989,60 @@ the code is stricter than §3 the text above still describes the intent.
       1.19.0's binary both name `/lib64/ld-linux-x86-64.so.2`, carry no
       `DT_RPATH` or `DT_RUNPATH`, and need only system libraries named
       without a `/` (`readelf`), and `explain --from-path` with this change
-      resolves both. Codex 0.156.1's npm entry point is a `#!/usr/bin/env
-      node` script, so its pinned ELF file is `node`; Codex's Linux native
-      binaries were not inspected. Ubuntu's `/usr/bin/node` carries
-      `DT_RUNPATH` `$ORIGIN/../lib:$ORIGIN/`, which stays in `/usr`, so it
-      resolves; the same file copied into an install root is refused. All
-      checked by hand on the reference host, 2026-10-17.
+      resolves both. Codex 0.159.2's Linux binary (a copy an earlier
+      benchmark left on the reference host) is a static-pie executable: a
+      dynamic section, no loader and no library entries; it resolves too.
+      Installed through npm (0.156.1, inspected on macOS), Codex's entry
+      point is a `#!/usr/bin/env node` script, so its pinned ELF file would
+      be `node`. Ubuntu's `/usr/bin/node`, as the program itself
+      (`ukai-jail node`), carries `DT_RUNPATH` `$ORIGIN/../lib:$ORIGIN/`,
+      which stays in root's `/usr`, so it resolves; the same file copied
+      into an install root is refused. All checked by hand on the
+      reference host, 2026-10-17 (the agents, with the change before its
+      review fixes). Programs that find libraries shipped beside them
+      through `$ORIGIN`, such as a conda or uv Python, an Electron app or a
+      JDK unpacked in the home directory, are refused under `--from-path`;
+      run them with explicit grants and without `@program`.
+    - The runtime roots here are the four every contained profile binds.
+      `tool` also binds `/sbin`, `/lib32` and `/libx32`, so a loader there
+      (an x32 program's) is refused, which J12 accepted.
 
-    Proved by unit tests in `program.rs` (`review_f2_*`): each refusal
-    above, under `DT_RUNPATH` and `DT_RPATH` alike, and the forms that pass;
-    32- and 64-bit images in both byte orders; a decoy table at
-    `PT_DYNAMIC`'s file offset; an entry past `DT_NULL` (ignored); `$ORIGIN`
-    as the program's own directory, not its install root; the interpreter
-    an expansion pins; and, on Linux, the host shell's real headers. On the
-    reference host through the CLI (`from_path_linux.rs`, `f2_*`), under
-    `tool` and `agent`: the host's `/bin/sh` patched to use a copy of the
-    host's loader in its install root, and patched with a relative
-    `DT_RUNPATH`, each runs on the host and is refused by the jail with
-    nothing run; synthetic programs with a `$ORIGIN` entry and with an entry
-    inside the repository are refused the same way. What remains:
-    - **The runtime roots are trusted as the system's own.** A process
-      running as the operator cannot replace a file there that root owns,
-      as on a stock host; the jail does not check owners below them, nor
-      the system's library configuration (`/etc/ld.so.cache`, bound where
-      present, can name directories elsewhere).
+    Proved by unit tests in `program.rs` (`review_f2_*`, with the review's
+    `review_f2k_*`): each refusal above, under `DT_RUNPATH` and `DT_RPATH`
+    alike, and the forms that pass; the loader read and a `DT_RUNPATH`
+    refusal in 32- and 64-bit images of both byte orders; a decoy table at
+    `PT_DYNAMIC`'s file offset; an entry past `DT_NULL` (ignored); virtual
+    addresses and file sizes, not physical addresses or memory sizes;
+    `$ORIGIN` as the program's own directory, not its install root; the
+    interpreter an expansion pins; each header refusal and bound; the owner
+    and mode rule on this operator's home directory and on `/tmp` (taken as
+    runtime roots for the test), and a system file passing it; and, on
+    Linux, the host shell's real headers. On the reference host through
+    the CLI (`from_path_linux.rs`, `f2_*`), under `tool` and `agent`: the
+    host's `/bin/sh` patched to use a copy of the host's loader in its
+    install root, and patched with a relative `DT_RUNPATH`, each runs on
+    the host and is refused by the jail with nothing run; synthetic
+    programs with a `$ORIGIN` entry and with an entry inside the
+    repository are refused the same way; and `/proc/self/exe` names a
+    program executed through the launcher's descriptor by its own path.
+    Not exercised by a test: a refusal for `/` itself, or for a location in
+    the runtime roots that root does not own alone (neither exists on a
+    stock host, and a test cannot make one without root); the code a
+    loader refused for that reason carries is unit-tested. What remains:
+    - **What the loader takes without a path to check:** a library it
+      picks by name inside a directory that passed (its directory is
+      root's alone; the file itself is not checked), the system's own
+      library directories, and its configuration (`/etc/ld.so.cache`,
+      bound where present, and musl's `/etc/ld-musl-ARCH.path`, which can
+      name directories elsewhere). These are trusted as the system's own.
     - **Files the program opens once it runs:** a library it loads later by
       a path of its own, or scripts and data it reads from the install
       root. A process running as the operator that replaces one runs its
       code inside the program the credential is bound to.
+    - **A program file crafted to disagree with itself** (a `PT_INTERP`
+      whose address shows another string than its file offset, overlapping
+      `PT_LOAD` segments, a `PT_PHDR` the loader would read otherwise) is
+      not refused: its own code runs as the program anyway.
     - Out of this item's scope: a process inside the jail that starts the
       pinned program again chooses its environment (`LD_PRELOAD`,
       `LD_LIBRARY_PATH`), and the vault identifies a connection's process by

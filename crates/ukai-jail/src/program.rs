@@ -26,9 +26,9 @@
 //!
 //! The first bytes of the executable decide what else it needs. An ELF file
 //! needs its loader, and every place its dynamic section lets the loader
-//! open a library from, inside the runtime roots: those are opened by path
-//! when it runs, so one in the install root would be code the pin does not
-//! cover (review F2 of the F5 fix). A
+//! open a library from, inside the runtime roots where only root can change
+//! them: those are opened by path when it runs, so one in the install root
+//! would be code the pin does not cover (review F2 of the F5 fix). A
 //! `#!` interpreter inside the runtime roots needs nothing more. `#!/usr/bin/env
 //! X` is expanded to `[X', E, ARG...]`, `X'` being `X` resolved the same way
 //! on the operator's `PATH`, because inside the jail `env` would search the
@@ -490,42 +490,133 @@ pub fn in_runtime_roots(path: &Path) -> bool {
 
 /// Where an absolute path the kernel or the dynamic loader opens inside the
 /// jail leads, when every location its resolution passes through lies in
-/// the runtime roots.
+/// the runtime roots and only root can change it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reach {
     /// It names an existing object.
     Found,
-    /// Its resolution stops inside the runtime roots (a missing name, a
-    /// file used as a directory, a link loop): it names nothing there, and
-    /// nothing below those read-only system trees can make it.
+    /// Its resolution stops inside the runtime roots at a missing name, a
+    /// file used as a directory or a link loop: it names nothing, and only
+    /// root could make it name something.
     Unreachable,
+}
+
+/// Why such a path is refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Escape {
+    /// It passes through a location outside the runtime roots.
+    Outside(PathBuf),
+    /// It passes through a location a user other than root could change:
+    /// owned by another uid, or writable by its group or by others.
+    Changeable {
+        location: PathBuf,
+        uid: u32,
+        mode: u32,
+    },
+    /// Its resolution failed otherwise (`EACCES`, `EIO`, ...).
+    Unfollowable(String),
+}
+
+impl Escape {
+    /// The code a loader refused for this reason carries: §3.3 step 5's
+    /// `exec_interpreter_missing` for one the jail would not show, or could
+    /// not reach, inside; `policy_widening` for one it shows but someone
+    /// other than root could replace.
+    fn loader_code(&self) -> ErrorCode {
+        match self {
+            Escape::Changeable { .. } => ErrorCode::PolicyWidening,
+            Escape::Outside(_) | Escape::Unfollowable(_) => ErrorCode::ExecInterpreterMissing,
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Escape::Outside(location) => format!(
+                "passes through {}, outside the runtime roots ({})",
+                location.display(),
+                RUNTIME_DIRECTORIES.join(", ")
+            ),
+            Escape::Changeable {
+                location,
+                uid,
+                mode,
+            } => format!(
+                "passes through {}, owned by uid {uid} with mode {mode:04o}: only what root \
+                 owns and alone can write is out of reach of a process running as this operator",
+                location.display()
+            ),
+            Escape::Unfollowable(error) => format!("cannot be followed: {error}"),
+        }
+    }
 }
 
 /// Review F2 of the F5 fix: follows the absolute `path` as the kernel does
 /// (`..` after the link before it, `MAXSYMLINKS`), requiring every location
-/// it passes through to lie in the runtime roots. Those are bound read-only
-/// at their own paths inside, so the path names the same object inside as
-/// here, and no file the pin leaves unchecked (the install root, a
-/// child-writable root, the working directory) is on its way.
+/// it passes through, and where it ends, to lie in the runtime roots, and
+/// each of them and `/` to be owned by root and writable by no one else (a
+/// link's own mode aside: replacing it takes a write to its directory). The
+/// runtime roots are bound read-only at their own paths inside, so the path
+/// names the same object inside as here, no file the pin leaves unchecked
+/// (the install root, a child-writable root, the working directory) is on
+/// its way, and no process running as a non-root operator can change what
+/// it names.
 ///
 /// # Errors
-/// The first location outside the runtime roots.
-fn reach_in_runtime_roots(path: &Path) -> Result<Reach, PathBuf> {
-    let mut outside = None;
+/// The first location outside the runtime roots or not root's alone, or a
+/// resolution error other than a missing name, a file used as a directory
+/// or a link loop.
+fn reach_in_runtime_roots(path: &Path) -> Result<Reach, Escape> {
+    reach_within(path, &in_runtime_roots)
+}
+
+/// [`reach_in_runtime_roots`] with `inside` deciding which locations are
+/// the runtime roots, so a test can name a tree it made.
+fn reach_within(path: &Path, inside: &dyn Fn(&Path) -> bool) -> Result<Reach, Escape> {
+    let changeable = |location: &Path| {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = std::fs::symlink_metadata(location).ok()?;
+        let (uid, mode) = (metadata.uid(), metadata.mode() & 0o7777);
+        (!metadata.file_type().is_symlink() && (uid != 0 || mode & 0o022 != 0)).then(|| {
+            Escape::Changeable {
+                location: location.to_path_buf(),
+                uid,
+                mode,
+            }
+        })
+    };
+    if let Some(escape) = changeable(Path::new("/")) {
+        return Err(escape);
+    }
+    let mut escape = None;
     let walked = walk_links(path, &mut |location| {
-        if in_runtime_roots(location) {
-            Ok(())
+        let refused = if inside(location) {
+            // A missing name is left to the walk's own `lstat`.
+            changeable(location)
         } else {
-            outside = Some(location.to_path_buf());
-            Err(std::io::Error::other("outside the runtime roots"))
+            Some(Escape::Outside(location.to_path_buf()))
+        };
+        match refused {
+            None => Ok(()),
+            Some(refused) => {
+                escape = Some(refused);
+                Err(std::io::Error::other("refused"))
+            }
         }
     });
-    match (walked, outside) {
-        (_, Some(location)) => Err(location),
+    match (walked, escape) {
+        (_, Some(escape)) => Err(escape),
         // `..` can end the walk at `/`, which no visit inspected.
-        (Ok(found), None) if !in_runtime_roots(&found.path) => Err(found.path),
+        (Ok(found), None) if !inside(&found.path) => Err(Escape::Outside(found.path)),
         (Ok(_), None) => Ok(Reach::Found),
-        (Err(_), None) => Ok(Reach::Unreachable),
+        (Err(error), None)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOENT | libc::ENOTDIR | libc::ELOOP)
+            ) =>
+        {
+            Ok(Reach::Unreachable)
+        }
+        (Err(error), None) => Err(Escape::Unfollowable(error.to_string())),
     }
 }
 
@@ -915,6 +1006,9 @@ const DT_FILTER: u64 = 0x7fff_ffff;
 const ELF_DYNAMIC_MAX: u64 = 64 * 1024;
 /// The longest dynamic string read.
 const ELF_STRING_MAX: u64 = 64 * 1024;
+/// The most bytes of library names and search paths read from one file, in
+/// total: real programs hold a few hundred.
+const ELF_LIBRARY_BYTES_MAX: usize = 1024 * 1024;
 
 /// What an ELF file's headers say is opened by path when it runs.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -931,8 +1025,12 @@ struct Elf {
 /// dynamic loader do: the first `PT_INTERP`; the dynamic section and its
 /// string table at their addresses, mapped to file offsets through the
 /// `PT_LOAD` segments (the loader never reads `PT_DYNAMIC`'s file offset);
-/// the table up to `DT_NULL`. Several `PT_DYNAMIC` headers refuse (glibc
-/// uses the last one).
+/// the table up to `DT_NULL`, each named string once. Refused as malformed,
+/// besides headers that cannot be read: several `PT_INTERP` (the kernel
+/// opens the first, musl names itself after the last) or `PT_DYNAMIC`
+/// (glibc reads the last) headers, a table with no `DT_NULL` within its
+/// size (the loaders read on), and more than [`ELF_LIBRARY_BYTES_MAX`]
+/// bytes of strings.
 fn elf_headers(file: &File, head: &[u8]) -> Result<Elf, String> {
     let truncated = || "its ELF headers are truncated".to_owned();
     let class64 = match head.get(4) {
@@ -976,7 +1074,8 @@ fn elf_headers(file: &File, head: &[u8]) -> Result<Elf, String> {
     if phnum == 0 {
         return Ok(elf);
     }
-    if phentsize < minimum || phnum > ELF_PHNUM_MAX {
+    // The kernel accepts no other program header size.
+    if phentsize != minimum || phnum > ELF_PHNUM_MAX {
         return Err("its ELF program headers are malformed".to_owned());
     }
     let table = read_at(file, phoff, phentsize * phnum).map_err(|e| e.to_string())?;
@@ -1005,7 +1104,12 @@ fn elf_headers(file: &File, head: &[u8]) -> Result<Elf, String> {
                     return Err("it has several dynamic sections".to_owned());
                 }
             }
-            Some(PT_INTERP) if elf.loader.is_none() => {
+            Some(PT_INTERP) => {
+                // The kernel opens the first; musl names itself after the
+                // last.
+                if elf.loader.is_some() {
+                    return Err("it names several ELF interpreters".to_owned());
+                }
                 if size == 0 || size > ELF_INTERP_MAX {
                     return Err("its ELF interpreter path is malformed".to_owned());
                 }
@@ -1046,21 +1150,30 @@ fn elf_headers(file: &File, head: &[u8]) -> Result<Elf, String> {
         return Err(truncated());
     }
     let width = if class64 { 8 } else { 4 };
-    let (mut strtab, mut strsz, mut named) = (None, None, Vec::new());
+    let (mut strtab, mut strsz, mut named, mut ended) = (None, None, Vec::new(), false);
     for entry in table.chunks_exact(2 * width) {
         let (Some(tag), Some(value)) = (field(entry, 0, width), field(entry, width, width)) else {
             return Err(truncated());
         };
         match tag {
-            DT_NULL => break,
+            DT_NULL => {
+                ended = true;
+                break;
+            }
             DT_STRTAB => strtab = Some(value),
             DT_STRSZ => strsz = Some(value),
             DT_NEEDED | DT_FILTER | DT_AUXILIARY | DT_RPATH | DT_RUNPATH | DT_AUDIT
-            | DT_DEPAUDIT => {
+            | DT_DEPAUDIT
+                if !named.contains(&(tag, value)) =>
+            {
                 named.push((tag, value));
             }
             _ => {}
         }
+    }
+    // The loaders read on to `DT_NULL`, past the size the header gives.
+    if !ended {
+        return Err("its dynamic section has no DT_NULL within its size".to_owned());
     }
     if named.is_empty() {
         return Ok(elf);
@@ -1070,6 +1183,7 @@ fn elf_headers(file: &File, head: &[u8]) -> Result<Elf, String> {
     };
     let strings = mapped(strtab, strsz)
         .ok_or_else(|| "its dynamic string table lies outside its loaded segments".to_owned())?;
+    let mut held = 0;
     for (tag, offset) in named {
         let at = strings
             .checked_add(offset)
@@ -1082,6 +1196,12 @@ fn elf_headers(file: &File, head: &[u8]) -> Result<Elf, String> {
                 "a dynamic string is unterminated or longer than {ELF_STRING_MAX} bytes"
             ));
         };
+        held += end;
+        if held > ELF_LIBRARY_BYTES_MAX {
+            return Err(format!(
+                "its library names and search paths exceed {ELF_LIBRARY_BYTES_MAX} bytes"
+            ));
+        }
         elf.libraries.push((tag, bytes[..end].to_vec()));
     }
     Ok(elf)
@@ -1089,57 +1209,67 @@ fn elf_headers(file: &File, head: &[u8]) -> Result<Elf, String> {
 
 /// §3.3 step 5, enforced as written (review F2 of the F5 fix): an ELF
 /// loader must lie in the runtime roots, by every location the kernel's
-/// resolution of `PT_INTERP` passes through. The kernel opens it by path at
-/// the exec, so one in the install root, which a process running as the
-/// operator can replace, would run that process's code inside the pinned
+/// resolution of `PT_INTERP` passes through, and only root may be able to
+/// change it ([`reach_in_runtime_roots`]). The kernel opens it by path at
+/// the exec, so one a process running as the operator can replace (in the
+/// install root, say) would run that process's code inside the pinned
 /// program; and one reached through a link elsewhere names nothing inside.
+/// Outside the runtime roots or unreachable is `exec_interpreter_missing`,
+/// as §3.3 says; changeable by someone other than root is
+/// `policy_widening`.
 fn check_loader(executable: &Executable, loader: Option<&Path>) -> Result<(), JailError> {
     let Some(loader) = loader else {
         return Ok(());
     };
-    let missing = |why: String| {
-        refused(
-            ErrorCode::ExecInterpreterMissing,
-            format!(
-                "the ELF loader {} of {} {why}",
-                loader.display(),
-                executable.path.display()
-            ),
+    let message = |why: String| {
+        format!(
+            "the ELF loader {} of {} {why}",
+            loader.display(),
+            executable.path.display()
         )
     };
     match reach_in_runtime_roots(loader) {
         Ok(Reach::Found) => Ok(()),
-        Ok(Reach::Unreachable) => Err(missing("does not exist".to_owned())),
-        Err(location) => Err(missing(format!(
-            "lies outside the runtime roots ({} is not in {}); a loader anywhere else is \
-             opened by path when the program runs, outside the pin",
-            location.display(),
-            RUNTIME_DIRECTORIES.join(", ")
-        ))),
+        Ok(Reach::Unreachable) => Err(refused(
+            ErrorCode::ExecInterpreterMissing,
+            message("does not exist".to_owned()),
+        )),
+        Err(escape) => Err(refused(
+            escape.loader_code(),
+            message(format!(
+                "{}; the loader is opened by path when the program runs, outside the pin",
+                escape.describe()
+            )),
+        )),
     }
 }
 
 /// Review F2 of the F5 fix: the dynamic loader opens by path every library
 /// the pinned ELF file names, and searches its `DT_RPATH` and `DT_RUNPATH`
-/// first. Every place it can open one from must lie in the runtime roots,
-/// as the loader must, so no library comes from the install root (which a
-/// process running as the operator can change), a child-writable root or
-/// the working directory:
+/// first. Every place it can open one from must pass the loader's own rule
+/// ([`reach_in_runtime_roots`]: in the runtime roots, root's alone), so no
+/// library comes from the install root, a child-writable root, the working
+/// directory or anywhere else a process running as the operator can change:
 ///
-/// - a search path entry must be absolute once `$ORIGIN` (the program's own
-///   directory, which `/proc/self/exe` names alike inside) is expanded, and
-///   reach only the runtime roots. An empty or relative entry (searched from
-///   the working directory) refuses, and so does one holding another `$`
-///   token (`$LIB`, `$PLATFORM`), whose value this resolution does not know;
+/// - a search path entry (separated by `:`, and by a newline, as musl
+///   does) must be absolute once `$ORIGIN` (the program's own directory,
+///   which `/proc/self/exe` names alike inside) is expanded, and pass. An
+///   empty entry (glibc searches the working directory for it) or a
+///   relative one (searched from the working directory) refuses, and so
+///   does one holding another `$` token (`$LIB`, `$PLATFORM`), whose value
+///   this resolution does not know;
 /// - a library name (`DT_NEEDED`, `DT_FILTER`, `DT_AUXILIARY`, or one of
 ///   the colon-separated `DT_AUDIT` and `DT_DEPAUDIT` names) with a `/` is
-///   opened as that path: it must be absolute and reach only the runtime
-///   roots. One holding a `$` refuses wherever the `$` is: glibc expands a
-///   token there before deciding whether the name is a path (`${ORIGIN}x`
-///   becomes one), musl never does. A name with neither is searched for on
-///   the path checked here and in the system's own directories.
+///   opened as that path: it must be absolute and pass. One holding a `$`
+///   refuses wherever the `$` is: glibc expands a token there before
+///   deciding whether the name is a path (`${ORIGIN}x` becomes one), musl
+///   never does. A name with neither is searched for on the path checked
+///   here and in the system's own directories.
+///
+/// Each distinct path is followed once.
 fn check_libraries(executable: &Executable, libraries: &[(u64, Vec<u8>)]) -> Result<(), JailError> {
     let origin = executable.path.parent().unwrap_or(Path::new("/"));
+    let mut followed = std::collections::HashSet::new();
     for (tag, value) in libraries {
         let what = match *tag {
             DT_NEEDED => "DT_NEEDED",
@@ -1153,24 +1283,25 @@ fn check_libraries(executable: &Executable, libraries: &[(u64, Vec<u8>)]) -> Res
         let refuse = |why: String| {
             widening(format!(
                 "{} names `{}` in its {what}: {why}. --from-path pins the program's own file; a \
-                 library it loads must come from the runtime roots ({})",
+                 library it loads must come from the runtime roots, where only root can change it",
                 executable.path.display(),
                 String::from_utf8_lossy(value),
-                RUNTIME_DIRECTORIES.join(", ")
             ))
         };
-        let outside = |what: String, location: PathBuf| {
-            format!(
-                "{what} passes through {}, outside the runtime roots",
-                location.display()
-            )
+        let mut follow = |path: &[u8], shown: String| -> Result<(), JailError> {
+            if !followed.insert(path.to_vec()) {
+                return Ok(());
+            }
+            reach_in_runtime_roots(Path::new(OsStr::from_bytes(path)))
+                .map(|_| ())
+                .map_err(|escape| refuse(format!("{shown} {}", escape.describe())))
         };
         if matches!(*tag, DT_RPATH | DT_RUNPATH) {
-            for entry in value.split(|byte| *byte == b':') {
+            for entry in value.split(|byte| matches!(*byte, b':' | b'\n')) {
                 let shown = String::from_utf8_lossy(entry);
                 if entry.is_empty() {
                     return Err(refuse(
-                        "an empty entry searches the working directory".to_owned(),
+                        "an empty entry, which glibc searches as the working directory".to_owned(),
                     ));
                 }
                 let Some(expanded) = expand_origin(entry, origin) else {
@@ -1183,13 +1314,11 @@ fn check_libraries(executable: &Executable, libraries: &[(u64, Vec<u8>)]) -> Res
                         "the relative entry `{shown}` searches from the working directory"
                     )));
                 }
-                let expanded = Path::new(OsStr::from_bytes(&expanded));
-                reach_in_runtime_roots(expanded).map_err(|location| {
-                    refuse(outside(
-                        format!("the entry `{shown}` ({})", expanded.display()),
-                        location,
-                    ))
-                })?;
+                let described = format!(
+                    "the entry `{shown}` ({})",
+                    String::from_utf8_lossy(&expanded)
+                );
+                follow(&expanded, described)?;
             }
             continue;
         }
@@ -1213,8 +1342,7 @@ fn check_libraries(executable: &Executable, libraries: &[(u64, Vec<u8>)]) -> Res
                     "the relative library `{shown}` is opened from the working directory"
                 )));
             }
-            reach_in_runtime_roots(Path::new(OsStr::from_bytes(name)))
-                .map_err(|location| refuse(outside(format!("the library `{shown}`"), location)))?;
+            follow(name, format!("the library `{shown}`"))?;
         }
     }
     Ok(())
@@ -1899,7 +2027,11 @@ mod tests {
             "{}",
             error.message
         );
-        assert!(error.message.contains("lies outside"), "{}", error.message);
+        assert!(
+            error.message.contains("outside the runtime roots"),
+            "{}",
+            error.message
+        );
     }
 
     /// Kills: `pin` without its bound on `levels` (a shallow executable and
@@ -2418,5 +2550,558 @@ mod tests {
         );
         let pinned = pin(&shell, 1).unwrap();
         check_libraries(&pinned, &elf.libraries).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Review of review F2 (2026-10-17): killer tests for the mutation pass
+    // (`review_f2k_*`, pass at cf7788be0) and proofs of findings
+    // (`review_f2x_*`, FAIL at cf7788be0 until the finding is fixed)
+    // -----------------------------------------------------------------------
+
+    /// The file offset of program header `index` of a builder image.
+    fn header_at(class64: bool, index: usize) -> usize {
+        if class64 {
+            64 + 56 * index
+        } else {
+            52 + 32 * index
+        }
+    }
+
+    fn put(bytes: &mut [u8], at: usize, width: usize, value: u64) {
+        bytes[at..at + width].copy_from_slice(&value.to_le_bytes()[..width]);
+    }
+
+    fn get(bytes: &[u8], at: usize, width: usize) -> u64 {
+        let mut value = [0u8; 8];
+        value[..width].copy_from_slice(&bytes[at..at + width]);
+        u64::from_le_bytes(value)
+    }
+
+    /// Where `needle` first lies in `bytes`.
+    fn find_bytes(bytes: &[u8], needle: &[u8]) -> usize {
+        bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap()
+    }
+
+    /// Resolves `agent`, the raw `bytes` placed in `root/bin`.
+    fn resolve_bytes(root: &Path, bytes: &[u8]) -> Result<Program, JailError> {
+        let bin = root.join("bin");
+        executable(&bin.join("agent"), bytes);
+        resolve("agent", Some(bin.as_os_str().as_bytes()), 1)
+    }
+
+    /// The file offset of the dynamic table of a 64-bit little-endian
+    /// builder image with a loader (its third program header).
+    fn table_at(bytes: &[u8]) -> usize {
+        usize::try_from(get(bytes, header_at(true, 2) + 8, 8)).unwrap()
+    }
+
+    /// A pinned system executable lying directly in `/usr/bin`, its install
+    /// root `levels` up.
+    fn pinned_system(levels: u8) -> Executable {
+        let system = ["/usr/bin/dash", "/usr/bin/env", "/usr/bin/true"]
+            .iter()
+            .filter_map(|path| std::fs::canonicalize(path).ok())
+            .find(|path| path.parent() == Some(Path::new("/usr/bin")))
+            .expect("an executable whose canonical path lies directly in /usr/bin");
+        pin(&system, levels).unwrap()
+    }
+
+    /// Kills: `expand_origin` without the identifier rule for digits (and
+    /// letters, `_`, an unclosed brace, a lone `$`): glibc keeps such a
+    /// token literally, so `$ORIGIN0/lib` is a relative path searched from
+    /// the working directory, while the mutant reads it as `/usr/bin0/lib`
+    /// for a program in `/usr/bin`, inside the runtime roots.
+    #[test]
+    fn review_f2k_origin_followed_by_an_identifier_character_is_another_token() {
+        let origin = Path::new("/o");
+        for entry in [
+            "$ORIGIN0",
+            "$ORIGINa",
+            "$ORIGINZ",
+            "$ORIGIN_",
+            "${ORIGIN",
+            "${ORIGINX}",
+            "$",
+            "$$ORIGIN",
+            "${origin}",
+        ] {
+            assert_eq!(expand_origin(entry.as_bytes(), origin), None, "{entry}");
+        }
+        for (entry, expanded) in [
+            ("$ORIGIN.", "/o."),
+            ("$ORIGIN-x", "/o-x"),
+            ("${ORIGIN}0", "/o0"),
+            ("x$ORIGIN", "x/o"),
+        ] {
+            assert_eq!(
+                expand_origin(entry.as_bytes(), origin),
+                Some(expanded.as_bytes().to_vec()),
+                "{entry}"
+            );
+        }
+        let pinned = pinned_system(2);
+        let error = check_libraries(&pinned, &[(DT_RUNPATH, b"$ORIGIN0/lib".to_vec())])
+            .expect_err("$ORIGIN0 is not $ORIGIN");
+        assert!(error.message.contains("`$` token"), "{}", error.message);
+    }
+
+    /// Kills: `DT_NEEDED` split at `:` like the audit lists. The loader opens
+    /// `x:/usr/lib/y.so` as one relative path, from the working directory.
+    #[test]
+    fn review_f2k_a_needed_name_is_one_path_colons_and_all() {
+        let (_dir, root) = tree();
+        assert_refused(
+            resolve_image(
+                &root,
+                &Image::new()
+                    .interp(SYSTEM_FILE)
+                    .entry(elf::DT_NEEDED, "x:/usr/lib/y.so"),
+            ),
+            ErrorCode::PolicyWidening,
+            &["DT_NEEDED", "relative library"],
+            "x:/usr/lib/y.so",
+        );
+    }
+
+    /// Kills: the loader read in one class or byte order only (the
+    /// existing class tests pass with no loader read at all).
+    #[test]
+    fn review_f2k_a_loader_outside_the_roots_refuses_in_every_class_and_order() {
+        let (_dir, root) = tree();
+        let outside = root.join("elsewhere/ld.so");
+        for (label, image) in [
+            ("64-bit little-endian", Image::new()),
+            ("64-bit big-endian", Image::new().big_endian()),
+            ("32-bit little-endian", Image::new().class32()),
+            ("32-bit big-endian", Image::new().class32().big_endian()),
+        ] {
+            assert_refused(
+                resolve_image(&root, &image.interp(outside.as_os_str().as_bytes())),
+                ErrorCode::ExecInterpreterMissing,
+                &["outside the runtime roots"],
+                label,
+            );
+        }
+    }
+
+    /// Kills: segments mapped by their physical address (`p_paddr`), in
+    /// either class: the loader maps and reads virtual addresses.
+    #[test]
+    fn review_f2k_addresses_are_virtual_not_physical() {
+        let (_dir, root) = tree();
+        for class64 in [true, false] {
+            let image = |runpath: &str| {
+                let image = Image::new()
+                    .interp(SYSTEM_FILE)
+                    .entry(elf::DT_RUNPATH, runpath);
+                let image = if class64 { image } else { image.class32() };
+                let mut bytes = image.bytes();
+                let width = if class64 { 8 } else { 4 };
+                let paddr = if class64 { 24 } else { 12 };
+                for index in 0..3 {
+                    put(
+                        &mut bytes,
+                        header_at(class64, index) + paddr,
+                        width,
+                        0x0dea_0000,
+                    );
+                }
+                bytes
+            };
+            resolve_bytes(&root, &image("/usr/lib"))
+                .unwrap_or_else(|error| panic!("{class64}: {}", error.message));
+            assert_refused(
+                resolve_bytes(&root, &image("$ORIGIN")),
+                ErrorCode::PolicyWidening,
+                &["DT_RUNPATH"],
+                &format!("64-bit: {class64}"),
+            );
+        }
+    }
+
+    /// Kills: a segment's memory size (`p_memsz`) taken for its file size,
+    /// and a mapping that only checks where the table starts: a dynamic
+    /// table past the file-backed part of its segment refuses.
+    #[test]
+    fn review_f2k_only_the_file_backed_part_of_a_segment_is_read() {
+        let (_dir, root) = tree();
+        for class64 in [true, false] {
+            let image = Image::new()
+                .interp(SYSTEM_FILE)
+                .entry(elf::DT_RUNPATH, "/usr/lib");
+            let bytes = if class64 { image } else { image.class32() }.bytes();
+            let (width, offset, filesz) = if class64 { (8, 8, 32) } else { (4, 4, 16) };
+            let table = get(&bytes, header_at(class64, 2) + offset, width);
+            for cut_at in [table, table + 8] {
+                let mut cut = bytes.clone();
+                put(&mut cut, header_at(class64, 1) + filesz, width, cut_at);
+                let error = resolve_bytes(&root, &cut).expect_err("cut");
+                assert_eq!(error.code, ErrorCode::InvalidConfig, "{}", error.message);
+                assert!(
+                    error.message.contains("outside its loaded segments"),
+                    "{}",
+                    error.message
+                );
+            }
+        }
+    }
+
+    /// Kills: the first `DT_STRTAB` read instead of the last, which glibc
+    /// and musl both use. The last one shifts the string table so the
+    /// `DT_RUNPATH` that reads `/usr/lib` through the first reads `$ORIGIN`.
+    #[test]
+    fn review_f2k_the_last_string_table_entry_is_the_one_read() {
+        let (_dir, root) = tree();
+        let mut bytes = Image::new()
+            .interp(SYSTEM_FILE)
+            .entry(elf::DT_RUNPATH, "/usr/lib")
+            .entry(elf::DT_NEEDED, "Z$ORIGIN")
+            .bytes();
+        let table = table_at(&bytes);
+        let strtab = get(&bytes, table + 8, 8);
+        // Entries: STRTAB, STRSZ, RUNPATH (offset 1), NEEDED (offset 10).
+        put(&mut bytes, table + 3 * 16, 8, DT_STRTAB);
+        put(&mut bytes, table + 3 * 16 + 8, 8, strtab + 10);
+        assert_refused(
+            resolve_bytes(&root, &bytes),
+            ErrorCode::PolicyWidening,
+            &["DT_RUNPATH", "$ORIGIN"],
+            "last DT_STRTAB",
+        );
+    }
+
+    /// Kills: each bound and malformed-input refusal of `elf_headers`: an
+    /// oversized dynamic section, a string longer than the bound or cut by
+    /// `DT_STRSZ`, an interpreter path empty, oversized, truncated, relative
+    /// or with an inner NUL, and too many or too small program headers.
+    #[test]
+    fn review_f2k_header_bounds_refuse() {
+        let (_dir, root) = tree();
+        let base = Image::new()
+            .interp(SYSTEM_FILE)
+            .entry(elf::DT_RUNPATH, "/usr/lib")
+            .bytes();
+        let table = table_at(&base);
+        let interp = header_at(true, 0);
+        let mut cases: Vec<(&str, Vec<u8>, &str)> = Vec::new();
+        let mut oversized = base.clone();
+        put(&mut oversized, header_at(true, 2) + 32, 8, 64 * 1024 + 16);
+        cases.push((
+            "dynamic over 64 KiB",
+            oversized,
+            "dynamic section is malformed",
+        ));
+        let long = format!("/usr{}", "/.".repeat(35_000));
+        cases.push((
+            "string over 64 KiB",
+            Image::new()
+                .interp(SYSTEM_FILE)
+                .entry(elf::DT_RUNPATH, &long)
+                .bytes(),
+            "longer than 65536 bytes",
+        ));
+        let mut unterminated = base.clone();
+        put(&mut unterminated, table + 16 + 8, 8, 4);
+        cases.push(("DT_STRSZ cuts the string", unterminated, "unterminated"));
+        let mut wide = base.clone();
+        put(&mut wide, table + 16 + 8, 8, 1 << 20);
+        cases.push((
+            "DT_STRSZ past the segment",
+            wide,
+            "string table lies outside its loaded segments",
+        ));
+        let mut past = base.clone();
+        let length = past.len() as u64;
+        put(&mut past, header_at(true, 1) + 32, 8, length + 4096);
+        put(
+            &mut past,
+            header_at(true, 2) + 32,
+            8,
+            length - table as u64 + 32,
+        );
+        cases.push(("dynamic table past the end of the file", past, "truncated"));
+        for (label, size) in [("empty interpreter", 0), ("interpreter over 4096", 4097)] {
+            let mut bytes = base.clone();
+            put(&mut bytes, interp + 32, 8, size);
+            cases.push((label, bytes, "interpreter path is malformed"));
+        }
+        let mut short = base.clone();
+        let end = short.len() as u64;
+        put(&mut short, interp + 8, 8, end - 4);
+        cases.push(("interpreter past the end", short, "truncated"));
+        for (label, path) in [
+            ("relative interpreter", &b"usr/bin/env"[..]),
+            ("inner NUL", &b"/usr/bin/env\0/x"[..]),
+        ] {
+            cases.push((
+                label,
+                Image::new().interp(path).bytes(),
+                "interpreter path is not absolute",
+            ));
+        }
+        let mut many = base.clone();
+        put(&mut many, 56, 2, 513);
+        cases.push(("513 headers", many, "program headers are malformed"));
+        let mut small = base.clone();
+        put(&mut small, 54, 2, 55);
+        cases.push(("55-byte headers", small, "program headers are malformed"));
+        for (label, bytes, fragment) in cases {
+            let error = resolve_bytes(&root, &bytes).expect_err(label);
+            assert_eq!(
+                error.code,
+                ErrorCode::InvalidConfig,
+                "{label}: {}",
+                error.message
+            );
+            assert!(
+                error.message.contains(fragment),
+                "{label}: {}",
+                error.message
+            );
+        }
+    }
+
+    /// Kills: a dynamic section bound below what real programs carry (a
+    /// browser-sized program names about a hundred entries).
+    #[test]
+    fn review_f2k_a_dynamic_section_of_real_size_passes() {
+        let (_dir, root) = tree();
+        let mut image = Image::new().interp(SYSTEM_FILE);
+        for index in 0..100 {
+            image = image.entry(elf::DT_NEEDED, format!("libdependency{index}.so.1"));
+        }
+        resolve_image(&root, &image).unwrap_or_else(|error| panic!("{}", error.message));
+    }
+
+    /// `reach_in_runtime_roots` against the kernel's resolution: where `..`
+    /// ends at `/` it refuses `/`; a name past a file or a missing name in
+    /// the runtime roots is unreachable; `..` inside them is followed.
+    #[test]
+    fn review_f2k_reach_ends_where_the_kernel_ends() {
+        for path in ["/", "/usr/..", "/usr/bin/../..", "/bin/../../.."] {
+            assert_eq!(
+                reach_in_runtime_roots(Path::new(path)),
+                Err(Escape::Outside(PathBuf::from("/"))),
+                "{path}"
+            );
+        }
+        for path in ["/usr/bin/env/x", "/usr/ukai-no-such-x/y"] {
+            assert_eq!(
+                reach_in_runtime_roots(Path::new(path)),
+                Ok(Reach::Unreachable),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            reach_in_runtime_roots(Path::new("/usr/../usr/bin/./env")),
+            Ok(Reach::Found)
+        );
+    }
+
+    /// Review of F2, finding 3: glibc loads every `DT_FILTER` and
+    /// `DT_AUXILIARY` name of the program as a dependency at startup
+    /// (`_dl_map_object_deps`, tokens expanded, a name with a `/` opened as
+    /// that path), so both are held to the library rules.
+    #[test]
+    fn review_f2_filter_and_auxiliary_names_are_held_to_the_library_rules() {
+        let (_dir, root) = tree();
+        let outside = root.join("bin/libx.so");
+        let outside = outside.to_str().unwrap();
+        for (tag, value) in [
+            (elf::DT_FILTER, "lib/libx.so".to_owned()),
+            (elf::DT_FILTER, "$ORIGIN/libx.so".to_owned()),
+            (elf::DT_AUXILIARY, outside.to_owned()),
+            (elf::DT_AUXILIARY, "x/y.so".to_owned()),
+        ] {
+            let image = Image::new().interp(SYSTEM_FILE).entry(tag, &value);
+            assert!(
+                resolve_image(&root, &image).is_err(),
+                "tag {tag:#x} {value:?} resolved"
+            );
+        }
+    }
+
+    /// Review of F2, finding 4: glibc and musl read the dynamic table until
+    /// `DT_NULL`, past `PT_DYNAMIC`'s size, so a table whose `DT_NULL` lies
+    /// beyond that size refuses (a `DT_RUNPATH` `$ORIGIN` follows the cut).
+    #[test]
+    fn review_f2_a_table_without_its_dt_null_refuses() {
+        let (_dir, root) = tree();
+        let mut bytes = Image::new()
+            .interp(SYSTEM_FILE)
+            .entry(elf::DT_RUNPATH, "$ORIGIN")
+            .bytes();
+        // STRTAB and STRSZ only: RUNPATH and DT_NULL follow, unread.
+        put(&mut bytes, header_at(true, 2) + 32, 8, 32);
+        put(&mut bytes, header_at(true, 2) + 40, 8, 32);
+        let error = resolve_bytes(&root, &bytes).expect_err("a table cut before its DT_NULL");
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{}", error.message);
+        assert!(error.message.contains("no DT_NULL"), "{}", error.message);
+    }
+
+    /// Review of F2, finding 5: musl's `path_open` splits a search path at
+    /// `:` and at newline (the separator of its `etc/ld-musl-*.path`), so
+    /// `/usr/lib\n<entry>` searches `<entry>`: each is checked.
+    #[test]
+    fn review_f2_a_newline_separates_search_path_entries() {
+        let (_dir, root) = tree();
+        let outside = root.join("lib");
+        for runpath in [
+            "/usr/lib\nlib".to_owned(),
+            format!("/usr/lib\n{}", outside.display()),
+        ] {
+            let image = Image::new()
+                .interp(SYSTEM_FILE)
+                .entry(elf::DT_RUNPATH, &runpath);
+            assert!(
+                resolve_image(&root, &image).is_err(),
+                "{runpath:?} resolved"
+            );
+        }
+    }
+
+    /// Review of F2, finding 6: the kernel opens the first `PT_INTERP` at
+    /// its file offset, but musl's loader names itself after the last one
+    /// (`ldso.name`) and derives the directory of its
+    /// `etc/ld-musl-ARCH.path` from that name, so a second `PT_INTERP`
+    /// refuses, whichever names what. (A `PT_INTERP` whose address shows
+    /// another string than its file offset is not refused: only a file
+    /// crafted to disagree with itself has one, and its own code runs as
+    /// the program anyway.)
+    #[test]
+    fn review_f2_several_loader_headers_refuse() {
+        let (_dir, root) = tree();
+        let elsewhere = format!("{}/x/lib/ld-musl-x86_64.so.1", root.display());
+        let image = Image::new()
+            .interp(SYSTEM_FILE)
+            .after_null(elf::DT_NEEDED, &elsewhere);
+        let base = image.bytes();
+        let at = find_bytes(&base, format!("{elsewhere}\0").as_bytes()) as u64;
+        // A second PT_INTERP (the PT_DYNAMIC retyped) naming `elsewhere`.
+        let mut second = base.clone();
+        let header = header_at(true, 2);
+        put(&mut second, header, 4, 3);
+        put(&mut second, header + 8, 8, at);
+        put(&mut second, header + 16, 8, elf::BASE + at);
+        put(&mut second, header + 32, 8, elsewhere.len() as u64 + 1);
+        put(&mut second, header + 40, 8, elsewhere.len() as u64 + 1);
+        let error = resolve_bytes(&root, &second).expect_err("a second PT_INTERP");
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{}", error.message);
+        assert!(
+            error.message.contains("several ELF interpreters"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// Review of F2, finding 1: the pin accepts install roots this operator
+    /// owns inside the runtime roots (a chowned `/usr/local`), and a `--rw`
+    /// grant can lie there too, so lying in the runtime roots is not enough:
+    /// every location must be root's alone. A tree under the home directory
+    /// (this operator's) and `/tmp` (root's, writable by everyone) are
+    /// refused when the runtime roots are taken to include them; a system
+    /// file passes. Kills: the owner or the mode left out of the rule.
+    #[test]
+    fn review_f2_only_a_location_root_owns_and_alone_can_write_passes() {
+        assert_eq!(
+            reach_in_runtime_roots(Path::new(SYSTEM_FILE)),
+            Ok(Reach::Found)
+        );
+        let me = crate::state::effective_uid();
+        if me != 0 {
+            let home = std::fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap();
+            match reach_within(&home.join("ukai-no-such-x"), &|_| true) {
+                Err(Escape::Changeable { uid, .. }) => assert_eq!(uid, me),
+                other => panic!("{}: {other:?}", home.display()),
+            }
+        }
+        let tmp = std::fs::canonicalize("/tmp").unwrap();
+        match reach_within(&tmp.join("ukai-no-such-x"), &|_| true) {
+            Err(Escape::Changeable {
+                location,
+                uid,
+                mode,
+            }) => {
+                assert_eq!((location, uid), (tmp, 0));
+                assert_ne!(mode & 0o002, 0);
+            }
+            other => panic!("/tmp: {other:?}"),
+        }
+    }
+
+    /// A location someone other than root could change is named with its
+    /// owner and mode, and a loader there is `policy_widening` (the jail
+    /// shows it, but it could be replaced), not `exec_interpreter_missing`.
+    #[test]
+    fn review_f2_a_changeable_location_names_its_owner_and_mode() {
+        let escape = Escape::Changeable {
+            location: PathBuf::from("/usr/local/lib"),
+            uid: 4242,
+            mode: 0o775,
+        };
+        let described = escape.describe();
+        assert!(
+            described.contains("/usr/local/lib")
+                && described.contains("uid 4242")
+                && described.contains("0775"),
+            "{described}"
+        );
+        assert_eq!(escape.loader_code(), ErrorCode::PolicyWidening);
+        assert_eq!(
+            Escape::Outside(PathBuf::from("/opt")).loader_code(),
+            ErrorCode::ExecInterpreterMissing
+        );
+        assert_eq!(
+            Escape::Unfollowable("EACCES".to_owned()).loader_code(),
+            ErrorCode::ExecInterpreterMissing
+        );
+    }
+
+    /// Review of F2, finding 8: the dynamic strings are bounded one by one
+    /// (64 KiB) and in total, and identical entries are read once: a 64 KiB
+    /// dynamic section of entries naming one 64 KiB string would otherwise
+    /// make resolution hold about 256 MiB for a file of about 130 KiB, and
+    /// entries naming 64 KiB strings at distinct offsets refuse.
+    #[test]
+    fn review_f2_dynamic_strings_are_bounded_in_total() {
+        let (_dir, root) = tree();
+        let long = "a".repeat(65_000);
+        let entries = (64 * 1024 - 3 * 16) / 16;
+        let mut image = Image::new()
+            .interp(SYSTEM_FILE)
+            .entry(elf::DT_NEEDED, &long);
+        for _ in 1..entries {
+            image = image.entry(elf::DT_NEEDED, "b");
+        }
+        let mut bytes = image.bytes();
+        let table = table_at(&bytes);
+        let first = get(&bytes, table + 2 * 16 + 8, 8);
+        for index in 1..entries {
+            put(&mut bytes, table + (2 + index) * 16 + 8, 8, first);
+        }
+        let path = root.join("big");
+        std::fs::write(&path, &bytes).unwrap();
+        let file = File::open(&path).unwrap();
+        let head = read_at(&file, 0, SHEBANG_MAX as u64).unwrap();
+        // Every entry names the same string: read once, and accepted.
+        let elf = elf_headers(&file, &head).unwrap();
+        let held: usize = elf.libraries.iter().map(|(_, name)| name.len()).sum();
+        assert_eq!((elf.libraries.len(), held), (1, long.len()));
+        // Distinct offsets into the long string: over the total bound.
+        for index in 1..entries {
+            put(
+                &mut bytes,
+                table + (2 + index) * 16 + 8,
+                8,
+                first + index as u64,
+            );
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        let file = File::open(&path).unwrap();
+        let error = elf_headers(&file, &head).expect_err("over the total bound");
+        assert!(error.contains("exceed"), "{error}");
     }
 }

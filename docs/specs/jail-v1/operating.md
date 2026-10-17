@@ -530,16 +530,19 @@ With `--from-path` (which the alias implies):
   rewrite its own executable would run that code with your authority on your
   next launch); or overlaps `/proc` or `/sys`.
 - **What it needs to run**: an ELF file needs its loader in the runtime roots,
-  reached only through them (a loader in the install root, or behind a link
-  or a `..` that leaves them, refuses, `exec_interpreter_missing`), and so
-  must every place its dynamic section lets the loader take a library from:
-  each `DT_RPATH` and `DT_RUNPATH` entry, `$ORIGIN` expanded to the program's
-  own directory, and each library named by a path. An entry outside the
-  runtime roots (`$ORIGIN` in an install root), an empty or relative one
-  (searched from the working directory, the repository), one holding
-  `$LIB` or `$PLATFORM`, and a library name holding a `$` refuse
-  (`policy_widening`, naming the entry): the
-  loader opens those files by path, outside the pin;
+  reached only through them and only through locations root owns and alone
+  can write (a loader in your install root, or behind a link or a `..` that
+  leaves them, refuses, `exec_interpreter_missing`; one in a directory under
+  `/usr` you own or a group can write, `policy_widening`), and so must every
+  place its dynamic section lets the loader take a library from: each
+  `DT_RPATH` and `DT_RUNPATH` entry, `$ORIGIN` expanded to the program's own
+  directory, and each library named by a path. An entry that fails that
+  (`$ORIGIN` in your install root), an empty or relative one (searched from
+  the working directory, the repository), one holding `$LIB` or
+  `$PLATFORM`, and a library name holding a `$` refuse (`policy_widening`,
+  naming the entry): the loader opens those files by path, outside the pin.
+  So a program that ships its libraries beside it (a conda or uv Python, an
+  Electron app) is refused here; run it with explicit grants instead;
   a `#!` interpreter in the runtime roots needs nothing more, and neither does
   `#!/usr/bin/env X` when `X` resolves inside them. When `X` resolves outside
   them, `#!/usr/bin/env X` becomes `[X', PROGRAM, ARG...]`, `X` resolved the
@@ -559,12 +562,13 @@ With `--from-path` (which the alias implies):
   the program that runs; a change is refused as an exec error
   (`outcome.cause` `ESTALE`, `policy_widening` at `--from-path`, exit 125)
   and nothing runs. What remains: the pin covers the program's own file;
-  its loader and the libraries loaded as it starts come from the runtime
-  roots (above), which only root can change on a stock host (owners there
-  are not checked), but files it opens once it runs (a library it loads
-  later by a path of its own, scripts and data in the install root) a
-  process running as you can still replace (its code then runs inside the
-  program, credential included); a
+  its loader and the directories its libraries come from are root's alone
+  (above), but the libraries the loader picks by name there, the system's
+  own library directories and configuration (`/etc/ld.so.cache`, musl's
+  `/etc/ld-musl-*.path`) are trusted unchecked, and files it opens once it
+  runs (a library it loads later by a path of its own, scripts and data in
+  the install root) a process running as you can still replace (its code
+  then runs inside the program, credential included); a
   write in place whose write and close both fall between the launcher's
   last check and the exec (two consecutive calls; a writer still holding the
   file open makes the exec fail with `ETXTBSY`); a same-size write within

@@ -1132,13 +1132,25 @@ fn host_shell() -> (Vec<u8>, PathBuf) {
 }
 
 /// Runs `program -c 'echo ran-directly'` on the host, outside any jail, from
-/// `cwd`: what it prints shows the fixture is a real program that runs.
+/// `cwd`: what it prints shows the fixture is a real program that runs. A
+/// file this process just wrote can be busy for a moment (`ETXTBSY`): a
+/// child another test thread forks inherits the writable descriptor until
+/// its own exec.
 fn runs_directly(program: &Path, cwd: &Path) -> String {
-    let output = Command::new(program)
-        .args(["-c", "echo ran-directly"])
-        .current_dir(cwd)
-        .output()
-        .unwrap();
+    let mut attempts = 0;
+    let output = loop {
+        match Command::new(program)
+            .args(["-c", "echo ran-directly"])
+            .current_dir(cwd)
+            .output()
+        {
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && attempts < 50 => {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => break result.unwrap(),
+        }
+    };
     assert_eq!(output.status.code(), Some(0), "{}", report(&output));
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -1287,5 +1299,33 @@ fn f2_a_library_path_outside_the_runtime_roots_is_refused() {
                 ],
             );
         }
+    }
+}
+
+/// Review F2 of the F5 fix: `$ORIGIN` is checked as the program's own
+/// directory, which the dynamic loader reads from `/proc/self/exe`. Inside,
+/// for a program executed through the launcher's descriptor, that names
+/// the program's canonical path, under `tool` and `agent`.
+#[test]
+fn f2_proc_self_exe_names_the_program_s_own_path_inside() {
+    if !common::live() {
+        return;
+    }
+    for jail in ["tool", "agent"] {
+        let live = Live::new();
+        let name = format!("f2exe{jail}");
+        live.profile(&name, &format!("name = \"{name}\"\njail = \"{jail}\"\n"));
+        elf_shell(&live, &name);
+        let output = live.output(
+            &live.repo,
+            &[os(&name), os("-c"), os("readlink /proc/$$/exe")],
+        );
+        assert_eq!(output.status.code(), Some(0), "{jail}: {}", report(&output));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("{}\n", live.bin.join(&name).display()),
+            "{jail}: {}",
+            report(&output)
+        );
     }
 }
