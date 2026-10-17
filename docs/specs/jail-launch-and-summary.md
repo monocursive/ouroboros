@@ -973,9 +973,10 @@ the code is stricter than §3 the text above still describes the intent.
       path, so `${ORIGIN}x` becomes one; musl never expands it); and a
       relative library path. In each search directory that exists and
       passes, the file the loader would take for a name without a `/`
-      (there, or in the directory's `glibc-hwcaps` subdirectories) must pass
-      too: only root can add a name to the directory, but a file in it need
-      not be root's (an operator's library moved there with `sudo mv`). The
+      (there, or in the directory's `glibc-hwcaps` subdirectories, by
+      reading: neither test host has one) must pass too: only root can add
+      a name to the directory, but a file in it need not be root's (an
+      operator's library moved there with `sudo mv`). The
       check runs whether or not the file names a loader, and follows each
       distinct path once.
     - **Headers this check would read otherwise than a loader** refuse as
