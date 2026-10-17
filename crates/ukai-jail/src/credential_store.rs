@@ -2,9 +2,9 @@
 //! (jail-launch-and-summary.md §3.5, §7 decision 6).
 //!
 //! Operator verbs that write and remove the files a launch profile's
-//! `@config/credentials/ID` sources name, so a subscription user stores a
-//! `claude setup-token` value once and every run vaults it. No agent is
-//! named here (I02).
+//! `@config/credentials/ID` sources name, so an operator stores a vendor's
+//! long-lived token once and every run vaults it. No agent is named here
+//! (I02); the bundled launch profiles say which token each one takes.
 //!
 //! - The value is read from stdin only: never from argv, never echoed. One
 //!   trailing LF is stripped; what remains must be 1 to

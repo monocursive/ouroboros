@@ -3836,6 +3836,10 @@ reason = "private mount namespace helper invoked by guarded_aliases_are_detected
 test = "ukai-jail/src/lib.rs::platform::linux::storage::tests::xfs_hard_quota_admission_and_sampling_survive_chmod"
 reason = "requires a disposable XFS mount with enforced user hard quotas and UKAI_TEST_XFS_DIR; independently passed as ukai-ci on a temporary loopback XFS volume on 2026-10-10, recorded in docs/benchmarks/jail/results/release-preview-2026-10-10/xfs; the non-sudo conformance lane does not provision mounts"
 
+[[ignored]]
+test = "ukai-jail/tests/j5_lifetime_linux.rs::l01_fork_burst_none_helper"
+reason = "a helper process of l01_a_fork_burst_is_fully_reaped, run once per --observe value"
+
 # ---------------------------------------- the pinned ignored set, macos lane
 
 [[ignored]]
